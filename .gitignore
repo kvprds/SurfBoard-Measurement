@@ -1,0 +1,5 @@
+surfboard_ai.db
+uploads/
+.env
+.json
+__pycache__/

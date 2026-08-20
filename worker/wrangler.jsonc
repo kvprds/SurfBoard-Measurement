@@ -10,14 +10,6 @@
 		"enabled": true
 	},
 
-	// Server-side rendering plus HMAC signing costs more than the 10ms of CPU
-	// the free plan allows per invocation, so this project assumes Workers Paid.
-	// 30s is the default ceiling; the queue consumer needs the headroom while it
-	// polls Gemini.
-	"limits": {
-		"cpu_ms": 30000
-	},
-
 	// --- Service 1 of 2: D1, the dataset -----------------------------------
 	// Replace database_id with the id printed by:
 	//   npx wrangler d1 create surfboard-db
@@ -42,29 +34,15 @@
 	],
 
 	// --- Async analysis ----------------------------------------------------
-	// Replaces threading.Thread from the Flask app. The upload request enqueues
-	// a job and returns immediately; the consumer below does the slow Gemini
-	// call with retries and a dead-letter queue.
-	//   npx wrangler queues create surfboard-analysis
-	//   npx wrangler queues create surfboard-analysis-dlq
-	"queues": {
-		"producers": [
-			{
-				"binding": "ANALYSIS_QUEUE",
-				"queue": "surfboard-analysis"
-			}
-		],
-		"consumers": [
-			{
-				"queue": "surfboard-analysis",
-				// One video per invocation: each message does a multi-minute
-				// Gemini call, and batching them would put several under one
-				// retry outcome.
-				"max_batch_size": 1,
-				"max_retries": 3,
-				"dead_letter_queue": "surfboard-analysis-dlq"
-			}
-		]
+	// Replaces threading.Thread from the Flask app. Cloudflare Queues would be
+	// the natural fit, but it is not available on the Workers free plan, so the
+	// job is recorded in D1 and this Cron Trigger sweeps it. Cron Triggers are
+	// free — 5 per account — and this project uses one.
+	//
+	// Every minute is the fastest cron allows, so a surfer waits up to a minute
+	// before their analysis starts. The dashboard already shows "Processing".
+	"triggers": {
+		"crons": ["* * * * *"]
 	},
 
 	// Non-secret configuration. Anything sensitive goes through
@@ -74,6 +52,7 @@
 		"SUPER_ADMIN_EMAIL": "you@example.com",
 		"EMAIL_FROM": "Surfing AI <onboarding@resend.dev>",
 		"GEMINI_MODEL": "gemini-2.5-flash",
-		"MAX_UPLOAD_BYTES": "104857600"
+		"MAX_UPLOAD_BYTES": "26214400",
+		"DAILY_ANALYSIS_CAP": "40"
 	}
 }

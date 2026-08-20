@@ -1,9 +1,11 @@
 # Architecture, and what the move from Flask actually changed
 
 The request was to split this into two native Cloudflare services: **D1** for
-the dataset and **Python Workers** for the routes. That is the shape of it. Two
-more bindings turned out to be load-bearing, and they are called out below
-rather than folded in quietly.
+the dataset and **Python Workers** for the routes. That is the shape of it, plus
+an R2 bucket for video, which is load-bearing rather than optional.
+
+It all runs on **free plans**. That constraint shaped one design decision in
+particular — see [the sweeper](#the-sweeper-is-a-queue-you-can-read).
 
 ```
                     ┌──────────────────────────────────┐
@@ -12,16 +14,14 @@ rather than folded in quietly.
                     │                                  │
                     │   src/worker.py   entry + queue  │
                     │   src/app.py      routes         │
-                    └───┬───────┬───────┬──────────┬───┘
-                        │       │       │          │
-              ┌─────────▼─┐ ┌───▼────┐ ┌▼────────┐ │
-              │    D1     │ │   R2   │ │ Queues  │ │
-              │  dataset  │ │ videos │ │ analysis│ │
-              └───────────┘ └────────┘ └────┬────┘ │
-                                            │      │
-                                   consumer ┘      │
-                                                   ▼
-                                    Gemini · Stripe · Resend
+                    │   scheduled()  ◄── Cron Trigger  │
+                    └───┬───────────┬──────────────┬───┘
+                        │           │              │
+              ┌─────────▼─┐   ┌─────▼────┐         │
+              │    D1     │   │    R2    │         ▼
+              │  dataset  │   │  videos  │   Gemini · Stripe
+              │  + jobs   │   └──────────┘        · Resend
+              └───────────┘
 ```
 
 **D1** holds every table: sessions, recommendations, inventory, chat, and the
@@ -34,9 +34,10 @@ runtime ships its own ASGI server, so there is no uvicorn.
 **R2** exists because a D1 row caps out around 1MB. Video cannot live in the
 database. R2's egress is free, which is what keeps playback off the cost sheet.
 
-**Queues** exists because a Worker cannot keep a thread alive past its response.
-It also brings retries and a dead-letter queue, which the original
-`threading.Thread` never had.
+**A Cron Trigger** fires `scheduled()` once a minute to run queued analyses,
+because a Worker cannot keep a thread alive past its response. Cloudflare Queues
+is the natural tool and was the first implementation, but it is the one service
+here with no free tier.
 
 ---
 
@@ -47,7 +48,7 @@ It also brings retries and a dead-letter queue, which the original
 | SQLAlchemy ORM | `src/db.py`, prepared statements | D1 speaks SQL over a binding. There is no dialect for it. |
 | `sqlite:///surfboard_ai.db` | D1 | The Worker filesystem is read-only and not shared between isolates. |
 | `f.save(filepath)` to `uploads/` | Streamed into R2 | Same reason, plus the 128MB memory ceiling. |
-| `threading.Thread` | Cloudflare Queue + consumer | Threads die when the response is sent. |
+| `threading.Thread` | D1 job table + Cron Trigger | Threads die when the response is sent. Queues would fit, but it is paid-only. |
 | `google-genai` SDK | REST via `fetch` | The SDK cannot run under Pyodide. |
 | `smtplib` to Gmail:465 | Resend HTTPS API | Workers cannot open a raw TCP socket to SMTP. |
 | Flask `session` | HMAC-signed cookie (`src/auth.py`) | No server-side session store; the cookie carries its own integrity. |
@@ -79,6 +80,50 @@ This is also why the upload cap moved from 500MB to 100MB: that is Cloudflare's
 request body limit on Free and Pro plans, and it is enforced before your code
 runs. Beyond it you need presigned URLs straight to R2, which is a bigger
 change than this migration needed.
+
+### The sweeper is a queue you can read
+
+Cloudflare Queues has no free tier, and this project runs at zero cost. So the
+job lives in the `surfer` table — a `status` column, an `attempts` counter, and
+a `claim_token` — and a Cron Trigger sweeps it every minute.
+
+Writing your own queue is usually a bad idea. It is defensible here because only
+three properties actually matter, and each is one SQL statement.
+
+**Exactly-once claiming.** Two cron ticks must never both take the same job:
+
+```sql
+UPDATE surfer
+   SET status='processing', claim_token=?, claimed_at=?, attempts=attempts+1
+ WHERE id = (SELECT id FROM surfer
+              WHERE status='queued'
+                 OR (status='processing' AND claimed_at < ?)   -- stale
+              ORDER BY timestamp ASC LIMIT 1)
+```
+
+One statement, and SQLite serialises writes, so the loser updates zero rows and
+gets `None`. A `SELECT` then `UPDATE` would leave a window where both ticks
+believe they own the job — and running Gemini twice on one clip costs money.
+
+**Retries.** `release_job()` puts a failed job back as `queued` and bumps
+`attempts`. Past `MAX_ATTEMPTS` it becomes `failed` with the error recorded,
+which is what the dead-letter queue was for.
+
+**Recovery from a dead worker.** The `claimed_at < ?` arm of that `WHERE` is a
+visibility timeout: a job claimed more than `CLAIM_TIMEOUT_SECONDS` ago is fair
+game again. Without it, a sweeper killed mid-analysis would strand its job
+forever. The timeout is 10 minutes — comfortably longer than the slowest
+realistic analysis, because reclaiming a job that is merely slow means paying
+Gemini twice.
+
+The costs of doing it this way, stated plainly: a job waits up to a minute
+before it starts, one job runs per tick, and the retry backoff is fixed at one
+minute rather than exponential. For a portfolio site none of those matter. If
+this ever needed throughput, `wrangler.jsonc` gains a `queues` block, `db.py`
+loses about sixty lines, and the sweeper becomes a `queue()` handler again.
+
+`tests/test_sweeper.py` covers all three properties, including two workers
+racing for one job and a stale claim being rescued.
 
 ### The CSRF middleware is not `@app.middleware("http")`
 
@@ -147,11 +192,18 @@ Small things, all in code that had to be touched anyway:
 
 ## Known limits
 
-- **Workers Paid ($5/mo) is required**, not optional. The free plan's 10ms CPU
-  budget is below what server-side rendering costs, and Queues is not on the
-  free plan at all.
-- **100MB per upload.** A Cloudflare account-plan limit, enforced upstream of
-  your code.
+- **Runs entirely on free plans.** Rendering the heaviest page measures ~0.5ms
+  of CPU against the free plan's 10ms budget, so server-side rendering is not
+  the problem I first assumed it was. The one paid-only service, Queues, is
+  replaced by the sweeper above.
+- **Analyses start up to a minute late**, because one minute is the fastest a
+  Cron Trigger fires.
+- **25MB per upload** by default (`MAX_UPLOAD_BYTES`), to keep several hundred
+  clips inside R2's 10GB free tier. Cloudflare's own request-body ceiling is
+  100MB on Free and Pro plans, enforced upstream of your code; beyond that you
+  need presigned URLs straight to R2.
+- **40 analyses per day** by default (`DAILY_ANALYSIS_CAP`), guarding Gemini's
+  free quota. Set it to `0` to lift the cap.
 - **Python Workers are in open beta.** The `python_workers` compatibility flag
   is required, and the API surface can still shift.
 - **Gemini file processing is polled** for up to ~3 minutes. Longer clips hit

@@ -11,7 +11,9 @@ memory, and a Worker has 128MB — one clip is enough to kill the isolate. Handl
 here, the bytes stay a ReadableStream and pass straight between the socket and
 R2 without ever being materialised.
 
-The `queue` handler at the bottom is what replaced threading.Thread.
+The `scheduled` handler at the bottom is what replaced threading.Thread:
+a Cron Trigger sweeping a job table in D1. Cloudflare Queues would be the
+natural fit, but it is not on the Workers free plan, and this runs free.
 """
 
 import json
@@ -188,32 +190,46 @@ class Default(WorkerEntrypoint):
         status = 206 if (range_header and getattr(obj, "range", None)) else 200
         return js.Response.new(obj.body, to_js({"status": status, "headers": headers}))
 
-    # -- queue consumer -----------------------------------------------------
+    # -- cron sweeper -------------------------------------------------------
 
-    async def queue(self, batch):
-        """Run the Gemini analysis for queued sessions.
+    async def scheduled(self, controller, env, ctx):
+        """Run one queued analysis. Fired by the Cron Trigger every minute.
 
-        This is the body of process_videos_background() from web.py. The logic
-        is the same — analyse each clip, refund anything that is not surfing,
-        write the result, email the surfer — but it now runs in a separate
-        invocation with retries behind it rather than in a thread that dies when
-        the response is sent.
+        This is what replaced threading.Thread, and then replaced Cloudflare
+        Queues: Queues is not available on the Workers free plan, and this
+        project is meant to run at zero cost. The job table in D1 plus a cron
+        tick gives the same three properties that mattered — a job is claimed
+        by exactly one worker, a failure is retried, and a worker that dies
+        mid-analysis does not strand the job forever.
+
+        Deliberately one job per tick. The free plan allows 10ms of CPU per
+        cron invocation; almost all of an analysis is spent waiting on the
+        network, which does not count toward CPU, but claiming several jobs at
+        once would multiply the parsing that does.
         """
-        for message in batch.messages:
-            try:
-                payload = message.body
-                if hasattr(payload, "to_py"):
-                    payload = payload.to_py()
-                await self._analyse_session(dict(payload))
-                message.ack()
-            except Exception as exc:  # noqa: BLE001
-                # retry() puts it back with backoff. After max_retries it lands
-                # on the dead-letter queue instead of vanishing.
-                print(f"Analysis job failed, retrying: {exc}")
-                message.retry()
+        database = dbx.Database(env.DB)
+        token = secrets.token_hex(16)
 
-    async def _analyse_session(self, job: dict) -> None:
-        env = self.env
+        job = await dbx.claim_next_job(database, token)
+        if job is None:
+            return  # nothing waiting; the common case
+
+        print(f"Sweeper claimed session {job['id']} (attempt {job['attempts']}).")
+        try:
+            await self._analyse_session(
+                {"surfer_id": job["id"], "email": job["user_email"],
+                 "bundle": job["bundle_used"]},
+                env=env,
+            )
+        except Exception as exc:  # noqa: BLE001
+            retrying = await dbx.release_job(database, job["id"], str(exc))
+            print(
+                f"Session {job['id']} failed: {exc} — "
+                + ("back in the queue." if retrying else "giving up after max attempts.")
+            )
+
+    async def _analyse_session(self, job: dict, env=None) -> None:
+        env = env if env is not None else self.env
         database = dbx.Database(env.DB)
 
         surfer_id = int(job["surfer_id"])
@@ -227,6 +243,9 @@ class Default(WorkerEntrypoint):
 
         videos = await dbx.videos_for_surfer(database, surfer_id)
         if not videos:
+            # Nothing to analyse. Fail it now rather than let it sit claimed
+            # until the stale timeout expires, three times over.
+            await dbx.mark_surfer_failed(database, surfer_id, "No videos were uploaded.")
             return
 
         examples = gemini.format_examples(await dbx.coach_examples(database, 5))

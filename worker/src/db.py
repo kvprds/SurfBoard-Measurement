@@ -8,7 +8,7 @@ Everything is a plain dict, keyed by column name.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def utcnow() -> str:
@@ -259,7 +259,8 @@ async def set_ai_recommendation(db: Database, surfer_id: int, rec: dict) -> None
     """
     await db.execute(
         "UPDATE surfer SET ai_rec_liters = ?, ai_rec_feet = ?, ai_rec_inches = ?,"
-        " ai_rec_message = ?, status = 'awaiting_coach' WHERE id = ?",
+        " ai_rec_message = ?, status = 'awaiting_coach', claim_token = NULL,"
+        " error_message = NULL WHERE id = ?",
         rec.get("rec_liters"),
         rec.get("rec_feet"),
         rec.get("rec_inches"),
@@ -272,13 +273,118 @@ async def set_final_recommendation(db: Database, surfer_id: int, rec: dict) -> N
     """Store the recommendation the surfer sees, completing the request."""
     await db.execute(
         "UPDATE surfer SET rec_liters = ?, rec_feet = ?, rec_inches = ?,"
-        " rec_message = ?, status = 'complete' WHERE id = ?",
+        " rec_message = ?, status = 'complete', claim_token = NULL,"
+        " error_message = NULL WHERE id = ?",
         rec.get("rec_liters"),
         rec.get("rec_feet"),
         rec.get("rec_inches"),
         rec.get("skill_assessment_text"),
         surfer_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# The analysis job queue, built on the surfer table
+# ---------------------------------------------------------------------------
+#
+# Cloudflare Queues would be the obvious tool, but it is not on the Workers free
+# plan. A Cron Trigger (free, 5 per account) sweeps this instead. What a queue
+# gives you and this has to reproduce: exactly-once claiming, retries, and
+# recovery when a worker dies holding a job.
+
+MAX_ATTEMPTS = 3
+
+# How long a claim is honoured before another tick may steal it. Longer than the
+# slowest realistic analysis, so a job that is merely slow is never processed
+# twice — running Gemini twice on one clip costs real money.
+CLAIM_TIMEOUT_SECONDS = 600
+
+
+async def enqueue_analysis(db: Database, surfer_id: int) -> None:
+    """Mark a session ready for the sweeper to pick up."""
+    await db.execute(
+        "UPDATE surfer SET status = 'queued' WHERE id = ? AND status = 'pending'",
+        surfer_id,
+    )
+
+
+async def claim_next_job(db: Database, token: str) -> dict | None:
+    """Atomically take ownership of one waiting job, or return None.
+
+    The claim is a single UPDATE. SQLite serialises writes, so two cron ticks
+    running at once cannot both come away believing they own the same row — the
+    second one updates zero rows and gets None.
+
+    A row stuck in 'processing' past CLAIM_TIMEOUT_SECONDS is fair game again.
+    That is the recovery path for a sweeper that was killed mid-analysis; a real
+    queue would call it visibility timeout.
+    """
+    stale_before = _iso_seconds_ago(CLAIM_TIMEOUT_SECONDS)
+    now = utcnow()
+
+    meta = await db.execute(
+        "UPDATE surfer"
+        "   SET status = 'processing', claim_token = ?, claimed_at = ?, attempts = attempts + 1"
+        " WHERE id = ("
+        "     SELECT id FROM surfer"
+        "      WHERE status = 'queued'"
+        "         OR (status = 'processing' AND claimed_at < ?)"
+        "      ORDER BY timestamp ASC LIMIT 1"
+        " )",
+        token,
+        now,
+        stale_before,
+    )
+    if int(meta.get("changes") or 0) == 0:
+        return None
+
+    return await db.first("SELECT * FROM surfer WHERE claim_token = ?", token)
+
+
+async def release_job(db: Database, surfer_id: int, error: str) -> bool:
+    """Hand a failed job back, or give up on it after MAX_ATTEMPTS.
+
+    Returns True if it will be retried, False if it is now marked failed.
+    """
+    row = await db.first("SELECT attempts FROM surfer WHERE id = ?", surfer_id)
+    attempts = int((row or {}).get("attempts") or 0)
+
+    if attempts >= MAX_ATTEMPTS:
+        await db.execute(
+            "UPDATE surfer SET status = 'failed', error_message = ?, claim_token = NULL"
+            " WHERE id = ?",
+            error[:500],
+            surfer_id,
+        )
+        return False
+
+    await db.execute(
+        "UPDATE surfer SET status = 'queued', error_message = ?, claim_token = NULL,"
+        " claimed_at = NULL WHERE id = ?",
+        error[:500],
+        surfer_id,
+    )
+    return True
+
+
+async def analyses_today(db: Database) -> int:
+    """How many analyses have been started since midnight UTC.
+
+    Gemini's free tier allows a few hundred requests a day. This is what the
+    daily cap in app.py checks, so a burst of traffic degrades into "try again
+    tomorrow" rather than a broken demo and a surprise bill.
+    """
+    row = await db.first(
+        "SELECT COUNT(*) AS n FROM surfer WHERE timestamp >= ?",
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00.000Z"),
+    )
+    return int((row or {}).get("n") or 0)
+
+
+def _iso_seconds_ago(seconds: int) -> str:
+    return (
+        datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 async def mark_surfer_failed(db: Database, surfer_id: int, message: str) -> None:

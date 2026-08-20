@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 HERE = pathlib.Path(__file__).parent
-SUITES = ["test_app.py", "test_money.py", "test_queue.py"]
+SUITES = ["test_app.py", "test_money.py", "test_sweeper.py"]
 
 failed = []
 for suite in SUITES:

@@ -1,4 +1,4 @@
-import sys, json, hmac, hashlib, time, asyncio
+import json, hmac, hashlib, time, asyncio
 import os, sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)

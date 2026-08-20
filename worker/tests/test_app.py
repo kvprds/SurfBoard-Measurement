@@ -1,4 +1,4 @@
-import sys, json, hmac, hashlib, time
+import asyncio
 import os, sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -58,7 +58,6 @@ check("dashboard renders", r.status_code == 200 and "My Dashboard" in r.text)
 check("new user starts with 1 AI bundle", "1 AI | 0 Pro | 0 Zoom" in r.text)
 # The chat panel only renders for users who own a Zoom bundle, so grant one
 # and re-fetch to prove the message really landed in D1.
-import asyncio
 asyncio.get_event_loop().run_until_complete(
     dbx.set_bundles(dbx.Database(env.DB), "surfer@example.com", "zoom", 1))
 check("zoom message was stored and displayed", "hello coach" in c.get("/dashboard").text)
@@ -98,13 +97,39 @@ check("absurd video count rejected", r4.status_code == 400, r4.status_code)
 print("\n=== submit with no uploaded video refunds ===")
 r = c.post(f"/api/analysis/{sid}/submit", headers={"X-CSRF-Token": csrf})
 check("submit with no videos is a 400", r.status_code == 400, r.status_code)
-check("nothing was queued", len(env.ANALYSIS_QUEUE.sent) == 0)
+check("nothing was left queued", asyncio.get_event_loop().run_until_complete(
+    dbx.Database(env.DB).query("SELECT * FROM surfer WHERE status = 'queued'")) == [])
 inv = asyncio.get_event_loop().run_until_complete(
     dbx.get_inventory(dbx.Database(env.DB), "surfer@example.com"))
 check("the AI bundle was refunded", inv["ai_bundles"] == 1, inv)
 rows = asyncio.get_event_loop().run_until_complete(
     dbx.Database(env.DB).query("SELECT * FROM surfer WHERE id = ?", sid))
 check("the abandoned session row was removed", rows == [], rows)
+
+print("\n=== daily analysis cap (protects the Gemini free tier) ===")
+cc, cenv = client(fakes.FakeEnv(SCHEMA, DAILY_ANALYSIS_CAP="2"))
+ccsrf = login(cc, "capped@example.com")
+loop = asyncio.get_event_loop()
+loop.run_until_complete(dbx.set_bundles(dbx.Database(cenv.DB), "capped@example.com", "ai", 10))
+cc.post("/new_analysis", data={"unit_sys": "metric", "height_cm": "180", "weight_kg": "75",
+                               "skill": "Pro", "_csrf_token": ccsrf}, follow_redirects=False)
+codes = []
+for _ in range(3):
+    codes.append(cc.post("/api/analysis/start", json={"tier": "standard", "count": 1},
+                         headers={"X-CSRF-Token": ccsrf}).status_code)
+check("first two analyses allowed", codes[:2] == [200, 200], codes)
+check("third is refused with 429, not a surprise bill", codes[2] == 429, codes)
+inv = loop.run_until_complete(dbx.get_inventory(dbx.Database(cenv.DB), "capped@example.com"))
+check("the refused attempt spent no bundle", inv["ai_bundles"] == 8, inv["ai_bundles"])
+
+ucc, uenv = client(fakes.FakeEnv(SCHEMA, DAILY_ANALYSIS_CAP="0"))
+ucsrf = login(ucc, "free@example.com")
+loop.run_until_complete(dbx.set_bundles(dbx.Database(uenv.DB), "free@example.com", "ai", 10))
+ucc.post("/new_analysis", data={"unit_sys": "metric", "height_cm": "180", "weight_kg": "75",
+                                "skill": "Pro", "_csrf_token": ucsrf}, follow_redirects=False)
+ok = [ucc.post("/api/analysis/start", json={"tier": "standard", "count": 1},
+               headers={"X-CSRF-Token": ucsrf}).status_code for _ in range(3)]
+check("cap of 0 disables the limit", ok == [200, 200, 200], ok)
 
 print("\n=== admin ===")
 ca, enva = client()

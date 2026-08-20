@@ -1,0 +1,79 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "surfboard-measurement",
+	"main": "src/worker.py",
+	"compatibility_date": "2026-06-01",
+	// Required while Python Workers are in open beta.
+	"compatibility_flags": ["python_workers"],
+
+	"observability": {
+		"enabled": true
+	},
+
+	// Server-side rendering plus HMAC signing costs more than the 10ms of CPU
+	// the free plan allows per invocation, so this project assumes Workers Paid.
+	// 30s is the default ceiling; the queue consumer needs the headroom while it
+	// polls Gemini.
+	"limits": {
+		"cpu_ms": 30000
+	},
+
+	// --- Service 1 of 2: D1, the dataset -----------------------------------
+	// Replace database_id with the id printed by:
+	//   npx wrangler d1 create surfboard-db
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "surfboard-db",
+			"database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+		}
+	],
+
+	// --- Video bytes -------------------------------------------------------
+	// D1 rows cap out around 1MB, so the clips cannot live in the database.
+	// R2 is the object store, and its egress is free, which is what makes
+	// serving video back to the browser affordable.
+	//   npx wrangler r2 bucket create surfboard-videos
+	"r2_buckets": [
+		{
+			"binding": "VIDEOS",
+			"bucket_name": "surfboard-videos"
+		}
+	],
+
+	// --- Async analysis ----------------------------------------------------
+	// Replaces threading.Thread from the Flask app. The upload request enqueues
+	// a job and returns immediately; the consumer below does the slow Gemini
+	// call with retries and a dead-letter queue.
+	//   npx wrangler queues create surfboard-analysis
+	//   npx wrangler queues create surfboard-analysis-dlq
+	"queues": {
+		"producers": [
+			{
+				"binding": "ANALYSIS_QUEUE",
+				"queue": "surfboard-analysis"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "surfboard-analysis",
+				// One video per invocation: each message does a multi-minute
+				// Gemini call, and batching them would put several under one
+				// retry outcome.
+				"max_batch_size": 1,
+				"max_retries": 3,
+				"dead_letter_queue": "surfboard-analysis-dlq"
+			}
+		]
+	},
+
+	// Non-secret configuration. Anything sensitive goes through
+	// `wrangler secret put` instead — see DEPLOY.md.
+	"vars": {
+		"APP_BASE_URL": "https://surfboard-measurement.workers.dev",
+		"SUPER_ADMIN_EMAIL": "you@example.com",
+		"EMAIL_FROM": "Surfing AI <onboarding@resend.dev>",
+		"GEMINI_MODEL": "gemini-2.5-flash",
+		"MAX_UPLOAD_BYTES": "104857600"
+	}
+}

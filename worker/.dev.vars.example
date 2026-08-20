@@ -1,0 +1,27 @@
+# Copy to `.dev.vars` for local `pywrangler dev` runs. NEVER commit .dev.vars —
+# it is gitignored. In production these same names are set as encrypted secrets
+# with `wrangler secret put <NAME>` (see DEPLOY.md).
+
+# 32+ random bytes. Signs the session cookie. Rotating it logs everyone out.
+#   python -c "import secrets; print(secrets.token_hex(32))"
+SESSION_SECRET=
+
+# Google Cloud console -> APIs & Services -> Credentials -> OAuth client ID
+# (type: Web application). The Flask app read these out of a client_secret JSON;
+# on Workers there is no filesystem, so they are secrets.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# https://aistudio.google.com/  -> Get API key
+GEMINI_API_KEY=
+
+# https://dashboard.stripe.com/apikeys  (use the sk_test_... key first)
+STRIPE_SECRET_KEY=
+# Printed by `stripe listen`, or shown when you create the webhook endpoint in
+# the dashboard. Starts with whsec_.
+STRIPE_WEBHOOK_SECRET=
+
+# https://resend.com/api-keys — Workers cannot open an SMTP socket, so email
+# goes out over HTTPS instead of smtplib. Leave blank to log emails instead of
+# sending them.
+RESEND_API_KEY=

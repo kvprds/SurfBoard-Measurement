@@ -401,6 +401,17 @@ async def analysis_start(request: Request):
     email = session["email"]
     database = _database(request)
 
+    # Gemini's free tier allows a few hundred requests a day. Refusing here
+    # keeps a busy day from silently turning into a bill, and gives the surfer a
+    # real answer instead of an analysis that fails later for reasons they
+    # cannot see. Set DAILY_ANALYSIS_CAP to 0 to lift it.
+    cap = int(_var(request, "DAILY_ANALYSIS_CAP", "0") or 0)
+    if cap and await dbx.analyses_today(database) + count > cap:
+        return JSONResponse(
+            {"detail": "This demo has hit its analysis limit for today. Please try again tomorrow."},
+            status_code=429,
+        )
+
     if not await dbx.spend_bundle(database, email, kind, count):
         return JSONResponse(
             {"detail": f"You do not have {count} {kind} bundle(s) available."},
@@ -427,12 +438,12 @@ async def analysis_start(request: Request):
 
 @app.post("/api/analysis/{surfer_id}/submit")
 async def analysis_submit(request: Request, surfer_id: int):
-    """Hand the finished upload to the queue.
+    """Mark the finished upload ready for analysis.
 
     This is where threading.Thread used to be. A Worker cannot keep a thread
-    alive past the response, so the job goes on a Cloudflare Queue and a
-    consumer picks it up — which also buys retries and a dead-letter queue that
-    a bare thread never had.
+    alive past its response, so the job is recorded in D1 and a Cron Trigger
+    picks it up — which also buys the retries and stale-claim recovery a bare
+    thread never had. See db.claim_next_job.
     """
     session = _session(request)
     if not session.get("email"):
@@ -458,11 +469,10 @@ async def analysis_submit(request: Request, surfer_id: int):
             request, session,
         )
 
-    await _env(request).ANALYSIS_QUEUE.send({
-        "surfer_id": surfer_id,
-        "email": session["email"],
-        "bundle": surfer["bundle_used"],
-    })
+    # Marks the row 'queued'. The Cron Trigger in worker.py sweeps it within a
+    # minute. Cloudflare Queues would be the natural home for this, but it is
+    # not on the Workers free plan and this project runs entirely free.
+    await dbx.enqueue_analysis(database, surfer_id)
 
     session.pop("upload", None)
     session.pop("pending_stats", None)

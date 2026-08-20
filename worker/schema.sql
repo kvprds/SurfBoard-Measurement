@@ -37,10 +37,22 @@ CREATE TABLE IF NOT EXISTS surfer (
     rec_inches        REAL,
     rec_message       TEXT,
 
-    -- Set when the queue consumer fails permanently, so the dashboard can show
-    -- something better than a row that hangs on "pending" forever.
+    -- Job state for the analysis sweeper. This table doubles as the work queue:
+    -- 'queued' rows are waiting, 'processing' is claimed, 'complete' /
+    -- 'awaiting_coach' are done, 'failed' gave up after MAX_ATTEMPTS.
+    --
+    -- Cloudflare Queues would be the natural fit, but it is not available on
+    -- the Workers free plan, so the job lives here and a Cron Trigger sweeps
+    -- it. Cron Triggers are free (5 per account).
     status            TEXT    NOT NULL DEFAULT 'pending',
-    error_message     TEXT
+    error_message     TEXT,
+
+    -- Set by the sweeper when it claims a row. claim_token proves the claim is
+    -- ours; claimed_at lets a later tick reclaim a job whose worker died
+    -- mid-flight, which is what gives this the retry behaviour a queue has.
+    attempts          INTEGER NOT NULL DEFAULT 0,
+    claim_token       TEXT,
+    claimed_at        TEXT
 );
 
 -- The dashboard lists a surfer's own rows newest-first; the admin queue scans
@@ -48,6 +60,9 @@ CREATE TABLE IF NOT EXISTS surfer (
 -- (D1 bills rows *read*, so an unindexed scan costs real money as data grows).
 CREATE INDEX IF NOT EXISTS idx_surfer_email_time ON surfer (user_email, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_surfer_pending    ON surfer (rec_liters) WHERE rec_liters IS NULL;
+-- The sweeper's hot query: find the oldest claimable job. Without this it would
+-- scan the whole table every minute, forever.
+CREATE INDEX IF NOT EXISTS idx_surfer_jobs       ON surfer (status, claimed_at);
 -- Few-shot examples are pulled from completed pro rows, newest first.
 CREATE INDEX IF NOT EXISTS idx_surfer_pro        ON surfer (is_pro, timestamp DESC) WHERE rec_liters IS NOT NULL;
 

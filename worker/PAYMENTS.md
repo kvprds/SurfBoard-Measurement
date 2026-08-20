@@ -3,6 +3,12 @@
 The shop page always showed three prices. The Buy buttons were `href="#"`.
 This is what fills that gap, and why it is built the way it is.
 
+**This ships in Stripe test mode.** Card `4242 4242 4242 4242` walks the entire
+flow — checkout, webhook, bundle credited — and no money moves. Test-mode keys
+need no account activation and no bank details, and Stripe charges no monthly
+fee either way, so the payment code costs nothing to keep. Going live is a key
+swap, covered at the end.
+
 Code: [`src/payments.py`](src/payments.py). Tests:
 [`tests/test_money.py`](tests/test_money.py).
 
@@ -142,7 +148,11 @@ stop retrying. When the payment does settle, a *different* event arrives.
 
 ---
 
-## What one sale is worth
+## What one sale would be worth
+
+None of this is charged in test mode. It is here because the numbers are the
+reason to pick one price over another, and they are worth knowing before you
+ever flip the switch.
 
 Stripe's standard US card rate is **2.9% + $0.30** per successful charge. It is
 charged on the transaction, not the profit, so the fixed 30c hurts small tickets
@@ -195,34 +205,47 @@ Per analysis, at published rates:
 | R2 Class A (the upload) | 1 | $0.0000045 |
 | Queues | 3 operations | $0.0000012 |
 
-Under a tenth of a cent, and the free allowances absorb most of it. **The real
-Cloudflare cost is the $5/month Workers Paid plan** — a fixed floor, not a
-per-sale cost. One AI bundle a month covers it. R2 egress being free is what
-keeps video playback from ever showing up on this table.
+Under a tenth of a cent, and at portfolio-site volume the **free allowances
+absorb all of it** — there is no Cloudflare bill at all. See
+[DEPLOY.md](DEPLOY.md#what-it-costs-nothing) for the allowance table. R2 egress
+being free is what keeps video playback from ever appearing on this list.
 
 ### Break-even
 
-```
-Fixed:     $5.00/month  (Workers Paid)
-Per sale:  $9.40 net on the cheapest bundle
+There is no fixed monthly cost to recover, so the first sale is profitable.
+Cloudflare only starts charging if you leave the free tier — realistically that
+means exceeding R2's 10GB of stored video (roughly 400 clips at the 25MB cap) or
+100,000 requests a day. Long before either, Gemini's free quota of a few hundred
+requests per day would be the thing you outgrew, and paid Gemini is still under
+a cent per analysis.
 
-Break-even: one $10 AI bundle per month.
-```
-
-Everything past that is margin until you are well into thousands of analyses.
+The number to keep in view is not the infrastructure. It is that **Stripe takes
+5.9% of a $10 sale and the AI costs 0.05% of it.**
 
 ---
 
-## Going live
+## Test mode, and going live if you ever want to
 
-1. Build against `sk_test_…` and card `4242 4242 4242 4242`. Every code path is
-   identical in test mode.
-2. `stripe listen --forward-to .../webhooks/stripe` replays real events at your
-   local server. `stripe trigger checkout.session.completed` fires one on demand.
-3. Activate the Stripe account (business details, bank account). Swap in the
-   `sk_live_…` key **and** the live endpoint's signing secret — they are
-   different values, and a mismatched secret shows up as a 400 on every webhook.
-4. Watch `npx wrangler tail` during your first real payment.
+As shipped, this is test mode and stays there. What that gets you:
+
+- Card `4242 4242 4242 4242`, any future expiry, any CVC. Stripe has a
+  [longer list](https://docs.stripe.com/testing) including cards that decline,
+  cards that require 3-D Secure, and cards that fail after authorisation.
+- Every code path is byte-identical to live mode. Test mode is not a simulation
+  of Stripe; it is Stripe, with a different ledger.
+- No account activation, no business details, no bank account, no monthly fee.
+- `stripe listen --forward-to .../webhooks/stripe` replays events at a local
+  server, and `stripe trigger checkout.session.completed` fires one on demand.
+
+Turning it into real money later, when there is a reason to:
+
+1. Activate the Stripe account — business details and a bank account.
+2. Swap in the `sk_live_…` key **and** the live endpoint's signing secret. They
+   are different values from their test counterparts, and a mismatched secret
+   shows up as a 400 on every webhook.
+3. Watch `npx wrangler tail` during your first real payment.
+
+Nothing in `src/payments.py` changes. That is the point of test mode.
 
 Reconciliation, when you need it:
 

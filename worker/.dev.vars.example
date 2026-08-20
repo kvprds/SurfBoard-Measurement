@@ -15,7 +15,8 @@ GOOGLE_CLIENT_SECRET=
 # https://aistudio.google.com/  -> Get API key
 GEMINI_API_KEY=
 
-# https://dashboard.stripe.com/apikeys  (use the sk_test_... key first)
+# https://dashboard.stripe.com/apikeys — use the sk_test_... key. Test mode
+# needs no account activation and moves no money.
 STRIPE_SECRET_KEY=
 # Printed by `stripe listen`, or shown when you create the webhook endpoint in
 # the dashboard. Starts with whsec_.

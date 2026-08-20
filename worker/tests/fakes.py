@@ -69,16 +69,10 @@ class FakeR2:
     async def delete(self, key): self.objects.pop(key, None)
 
 
-class FakeQueue:
-    def __init__(self): self.sent = []
-    async def send(self, body, **kw): self.sent.append(body)
-
-
 class FakeEnv:
     def __init__(self, schema_sql, **overrides):
         self.DB = FakeD1(schema_sql)
         self.VIDEOS = FakeR2()
-        self.ANALYSIS_QUEUE = FakeQueue()
         self.SESSION_SECRET = "t" * 64
         self.SUPER_ADMIN_EMAIL = "admin@example.com"
         self.APP_BASE_URL = "https://test.local"
@@ -90,7 +84,8 @@ class FakeEnv:
         self.GEMINI_MODEL = "gemini-2.5-flash"
         self.RESEND_API_KEY = None
         self.EMAIL_FROM = "t@t"
-        self.MAX_UPLOAD_BYTES = "104857600"
+        self.MAX_UPLOAD_BYTES = "26214400"
+        self.DAILY_ANALYSIS_CAP = "0"
         for k, v in overrides.items(): setattr(self, k, v)
 
 

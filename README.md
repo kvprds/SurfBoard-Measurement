@@ -57,7 +57,7 @@ Open `web.py` and replace every `CHANGE ME` placeholder with your own values:
 | `SUPER_ADMIN_EMAIL` | The email that gets admin access |
 | `EMAIL_SENDER` / `EMAIL_PASSWORD` | A Gmail address + [app password](https://myaccount.google.com/apppasswords) for notifications |
 
-> 🔒 Keep your real keys out of Git. Use a `.env` file or environment variables — never commit credentials. A `.gitignore` should exclude `.env`, `*.db`, and `uploads/`.
+> 🔒 Keep your real keys out of Git. Use a `.env` file or environment variables — never commit credentials. The committed `.gitignore` excludes `.env`, `*.json` (which covers the OAuth client-secret file), `*.db` and `uploads/`.
 
 **3. Run**
 
@@ -66,6 +66,19 @@ python web.py
 ```
 
 Then open **http://localhost:5000**.
+
+## 📂 What's in here
+
+| File | Status | What it is |
+| --- | --- | --- |
+| `web.py` | **Current** | The whole application — routes, models, Gemini call, admin dashboard. |
+| `surf_data.csv` | **Current** | Header-only template, one row per video, read by `jsonl.py`. |
+| `jsonl.py` | Reference | Builds a fine-tuning dataset from `surf_data.csv`. The app does **not** use it: sizing comes from few-shot prompting at request time, not a fine-tuned model. |
+| `seed_db.py` | **Does not run** | Written against an earlier `web.py`. It imports `analyze_video_bytes` and `train_ai`, neither of which still exists, so the import fails immediately. Kept for the dataset it carries — the pro-surfer URLs and the coach's measurements. Porting it means rewriting the analysis call and dropping the training step. |
+
+`seed_db.py` also needs `yt-dlp` and `mediapipe`, which are deliberately
+absent from the install line above — nothing in the running app imports
+them.
 
 ## 📌 Notes & Limitations
 

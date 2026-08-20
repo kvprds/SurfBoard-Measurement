@@ -1,9 +1,23 @@
+"""
+Dataset preparation for the fine-tuning approach, kept for reference.
+
+The shipped app does not use this. web.py few-shot prompts Gemini with
+the coach's past sizing decisions read from the database at request
+time, so there is no fine-tuned model and nothing consumes the JSONL
+this writes.
+
+Reads surf_data.csv, which is committed here as a header-only template -
+one row per video, filled in by hand. It expects 100 rows and warns if
+it finds a different number; an empty template will warn and produce
+empty output, which is correct for a template.
+"""
+
 import json
 import csv
 import random
 
 # Configuration
-CSV_FILE = 'surf_data.csv'
+CSV_FILE = 'surf_data.csv'  # committed as a header-only template
 CLOUD_BUCKET = 'gs://tomer-surf-training-data' # ⚠️ MAKE SURE THIS MATCHES YOUR BUCKET EXACTLY
 TRAIN_FILE = 'training_data.jsonl'
 TEST_FILE = 'validation_data.jsonl'

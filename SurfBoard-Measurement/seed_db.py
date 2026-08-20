@@ -1,3 +1,30 @@
+"""
+LEGACY - does not run against the current web.py.
+
+This script belongs to the earlier pipeline, when a video was scored by
+MediaPipe and the sizing came from a regression that had to be trained.
+It imports two functions that web.py no longer defines:
+
+    analyze_video_bytes   ->  replaced by analyze_surf_video_with_ai(
+                                  filepath, weight_kg, height_cm,
+                                  declared_skill, training_data)
+    train_ai              ->  gone entirely. There is no training step
+                              now: the app few-shot prompts Gemini with
+                              the coach's past sizing decisions, read
+                              from the database at request time.
+
+So the import below raises ImportError immediately. It is kept for the
+dataset it carries - the YouTube URLs and the coach's measurements for
+each pro surfer - which is still the seed data the few-shot examples
+come from. Porting it means rewriting the analysis call against the
+current signature and dropping the training step; that has not been
+done or tested, so it is left honest rather than half-fixed.
+
+The extra dependencies it needs are not in the README's install line:
+
+    pip install yt-dlp mediapipe
+"""
+
 import os
 import time
 import yt_dlp

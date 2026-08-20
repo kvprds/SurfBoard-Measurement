@@ -1,0 +1,19 @@
+[project]
+name = "surfboard-measurement"
+version = "1.0.0"
+description = "Surfboard sizing from video — Cloudflare Python Worker + D1"
+requires-python = ">=3.13"
+dependencies = [
+    # ASGI app framework. Supported natively by Python Workers; the runtime
+    # ships its own ASGI server, so there is no uvicorn here.
+    "fastapi",
+    # Pure-Python, so it installs into the Worker bundle fine. Renders the same
+    # markup the Flask app rendered with render_template_string.
+    "jinja2",
+]
+
+[dependency-groups]
+dev = [
+    "workers-py",
+    "workers-runtime-sdk",
+]

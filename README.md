@@ -7,6 +7,8 @@
 
 **A full-stack web app that recommends surfboard dimensions from a surfer's video, using Google's Gemini multimodal AI.**
 
+🔗 **Live:** <https://surfboard-measurement.tomer-berger08.workers.dev>
+
 > ⚠️ Software engineering **learning project**. Built to explore full-stack development and applied AI — not a production service.
 
 ---
@@ -38,7 +40,9 @@ To keep recommendations grounded in real expertise, the app pulls an experienced
 | Auth | Google OAuth (Authlib) |
 | Email | SMTP (Gmail) |
 
-## 🚀 Getting Started
+## 🚀 Running it yourself
+
+The deployed app is linked above. To run your own copy:
 
 **1. Install dependencies**
 

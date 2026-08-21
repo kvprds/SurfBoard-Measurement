@@ -58,21 +58,56 @@ class FakeD1:
         for s in stmts: await s.run()
 
 
-class FakeR2:
-    def __init__(self): self.objects = {}
-    async def put(self, key, body, opts=None):
-        self.objects[key] = body if isinstance(body, bytes) else b"x" * 1024
-        return types.SimpleNamespace(size=len(self.objects[key]))
-    async def get(self, key, opts=None):
-        if key not in self.objects: return None
-        return types.SimpleNamespace(size=len(self.objects[key]), body=self.objects[key])
-    async def delete(self, key): self.objects.pop(key, None)
+class FakeArrayBuffer:
+    """Stands in for a JS ArrayBuffer: the storage seam only reads byteLength."""
+    def __init__(self, data): self.data = data
+    @property
+    def byteLength(self): return len(self.data)
+
+
+class FakeKV:
+    """Workers KV, including the parts that bite.
+
+    `hidden` models eventual consistency: a key that has been written but is not
+    yet visible in this location. KV returns None for those, exactly as it does
+    for a key that never existed, which is the whole reason the storage seam
+    raises VideoMissing instead of returning None.
+    """
+    VALUE_LIMIT = 25 * 1024 * 1024
+
+    def __init__(self):
+        self.values = {}
+        self.ttls = {}
+        self.meta = {}
+        self.hidden = set()
+
+    async def put(self, key, value, expirationTtl=None, metadata=None):
+        data = value.data if isinstance(value, FakeArrayBuffer) else value
+        if len(data) > self.VALUE_LIMIT:
+            raise RuntimeError("value too large for KV")
+        self.values[key] = data
+        self.ttls[key] = expirationTtl
+        self.meta[key] = metadata
+
+    async def get(self, key, type=None):
+        if key in self.hidden:
+            return None
+        return self.values.get(key)
+
+    async def delete(self, key):
+        self.values.pop(key, None)
+        self.ttls.pop(key, None)
+        self.meta.pop(key, None)
+
+    # convenience for tests
+    @property
+    def objects(self): return self.values
 
 
 class FakeEnv:
     def __init__(self, schema_sql, **overrides):
         self.DB = FakeD1(schema_sql)
-        self.VIDEOS = FakeR2()
+        self.VIDEOS = FakeKV()
         self.SESSION_SECRET = "t" * 64
         self.SUPER_ADMIN_EMAIL = "admin@example.com"
         self.APP_BASE_URL = "https://test.local"
@@ -84,7 +119,8 @@ class FakeEnv:
         self.GEMINI_MODEL = "gemini-2.5-flash"
         self.RESEND_API_KEY = None
         self.EMAIL_FROM = "t@t"
-        self.MAX_UPLOAD_BYTES = "26214400"
+        self.MAX_UPLOAD_BYTES = "20971520"
+        self.VIDEO_TTL_DAYS = "30"
         self.DAILY_ANALYSIS_CAP = "0"
         for k, v in overrides.items(): setattr(self, k, v)
 

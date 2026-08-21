@@ -1,8 +1,8 @@
 # Deploying to Cloudflare — free tier
 
-This runs entirely on free plans. **No Cloudflare subscription, no Stripe
-monthly fee, no Google billing account.** Total time from a clean account:
-about 30 minutes, most of it waiting on Google's OAuth consent screen.
+This runs entirely on free plans, and **no payment card is needed anywhere** —
+not on Cloudflare, not on Stripe, not on Google. Total time from a clean
+account: about 30 minutes, most of it waiting on Google's OAuth consent screen.
 
 Every command below is run from the `worker/` directory.
 
@@ -14,16 +14,21 @@ Every command below is run from the `worker/` directory.
 | **Workers** CPU | 10ms per invocation | Measured ~0.5ms to render the heaviest page. |
 | **Cron Triggers** | 5 per account | 1 — the analysis sweeper. |
 | **D1** | 5GB, 5M rows read/day, 100k written/day | Kilobytes. Thousands of rows read per day at most. |
-| **R2** | 10GB storage, 1M writes, 10M reads/month | ~400 clips at the 25MB cap. Egress is always free. |
+| **Workers KV** | 1 GB storage, 1,000 writes/day, 100k reads/day | ~50 clips at the 20MB cap, expiring after 30 days. |
 | **Gemini 2.5 Flash** | ~250 requests/day | Capped at 40/day by `DAILY_ANALYSIS_CAP`. |
 | **Stripe** | No monthly fee | Test mode moves no money at all. |
 | **Resend** (optional) | 3,000 emails/month | A handful. |
 
-Two things keep it there, and both are deliberate:
+Three things keep it there, and all are deliberate:
 
 - **No Cloudflare Queues.** Queues is the one service here with no free tier, so
   the analysis job lives in a D1 table swept by a Cron Trigger instead. See
   [ARCHITECTURE.md](ARCHITECTURE.md#the-sweeper-is-a-queue-you-can-read).
+- **No R2.** R2 is the right tool for video, but enabling it puts a payment card
+  on your Cloudflare account. Workers KV is included in the free plan with no
+  card, so clips live there instead — with real limits, spelled out in
+  [`src/storage.py`](src/storage.py) and
+  [ARCHITECTURE.md](ARCHITECTURE.md#video-lives-in-kv-which-is-not-a-blob-store).
 - **Stripe stays in test mode.** The full checkout runs, the webhook fires, the
   bundle is credited — with test cards. See [PAYMENTS.md](PAYMENTS.md).
 
@@ -52,16 +57,20 @@ npx wrangler d1 execute surfboard-db --remote --file=./schema.sql
 
 Service 2 is the Worker itself, deployed in step 4.
 
-## 2. Create the video bucket
+## 2. Create the video store
 
 D1 rows cap out around 1MB, so the clips cannot live in the database:
 
 ```bash
-npx wrangler r2 bucket create surfboard-videos
+npx wrangler kv namespace create VIDEOS
 ```
 
-No queue to create — the Cron Trigger is declared in `wrangler.jsonc` and needs
-no setup.
+Copy the printed `id` into `wrangler.jsonc`, replacing
+`REPLACE_WITH_YOUR_KV_NAMESPACE_ID`.
+
+No card is required for this, which is the whole reason it is KV and not R2. No
+queue to create either — the Cron Trigger is declared in `wrangler.jsonc` and
+needs no setup.
 
 ## 3. Configure
 
@@ -72,7 +81,8 @@ Edit the `vars` block in `wrangler.jsonc`:
 | `APP_BASE_URL` | Your final Worker URL. Leave the placeholder for now; fix it after step 4. |
 | `SUPER_ADMIN_EMAIL` | The Google account that gets the admin dashboard. |
 | `EMAIL_FROM` | A verified Resend sender, or leave the default to log emails instead of sending. |
-| `MAX_UPLOAD_BYTES` | `26214400` (25MB). Raise it if you like — R2's free tier is 10GB total. |
+| `MAX_UPLOAD_BYTES` | `20971520` (20MB). Workers KV caps a value at 25 MiB, so do not go above about 24MB. |
+| `VIDEO_TTL_DAYS` | `30`. Clips delete themselves after this, keeping you inside KV's 1 GB. |
 | `DAILY_ANALYSIS_CAP` | `40`. Guards Gemini's free quota. `0` disables the cap. |
 
 Then set the secrets. These are encrypted at rest and never appear in
@@ -139,7 +149,7 @@ npx wrangler d1 execute surfboard-db --local --file=./schema.sql
 uv run pywrangler dev
 ```
 
-`pywrangler dev` runs a local D1 (SQLite on disk) and a local R2, so nothing
+`pywrangler dev` runs a local D1 (SQLite on disk) and a local KV, so nothing
 touches production.
 
 **Cron Triggers do not fire on their own in `dev`.** Poke the sweeper by hand:
@@ -172,7 +182,7 @@ npx wrangler d1 execute surfboard-db --remote --command \
   "SELECT id, status, attempts, error_message FROM surfer WHERE status != 'complete'"
 npx wrangler d1 execute surfboard-db --remote --command \
   "SELECT bundle, COUNT(*), SUM(amount_total_cents)/100.0 FROM purchase GROUP BY bundle"
-npx wrangler r2 object list surfboard-videos         # what is using your 10GB
+npx wrangler kv key list --binding VIDEOS            # what is using your 1 GB
 ```
 
 ## Staying inside the free tier
@@ -182,10 +192,29 @@ The cron fires every minute, which is 1,440 invocations a day against the
 schedule in `wrangler.jsonc` (`*/5 * * * *` for every five minutes); the only
 cost is that a surfer waits longer for their analysis to start.
 
-The allowance that will run out first is **R2 storage**, since clips are kept
-indefinitely. At the 25MB cap that is roughly 400 videos before you reach 10GB.
-Delete old sessions from the admin panel — it removes the R2 objects too — or
-add a cron that prunes sessions older than N days.
+The allowance that runs out first is **KV storage**: 1 GB, which is about 50
+clips at the 20MB cap. `VIDEO_TTL_DAYS` is what keeps that in check — every clip
+carries an expiry and deletes itself, so storage plateaus instead of growing.
+Deleting a session from the admin panel removes its clips immediately.
+
+The other free-plan ceiling worth knowing is **1,000 KV writes per day**. One
+upload is one write, so it is not a constraint for a portfolio site, but it is
+not a number you can scale into.
+
+### If you outgrow KV
+
+[`src/storage.py`](src/storage.py) is the only file that knows where video
+lives. Replacing it is the whole migration:
+
+| Option | Free tier | Card required |
+| --- | --- | --- |
+| **Cloudflare R2** | 10 GB, free egress | Yes — the reason it is not used here |
+| **Supabase Storage** | 1 GB | No |
+| **Cloudinary** | Video-oriented, 25 credits/month | No |
+
+R2 is the one to move to if you ever add a card: it is in the same runtime, it
+supports range requests (so video seeking works properly), and it has no
+25 MiB-per-object ceiling.
 
 ## Troubleshooting
 
@@ -194,6 +223,8 @@ add a cron that prunes sessions older than N days.
 | Login bounces to "That sign-in link did not match" | `APP_BASE_URL` does not match the redirect URI registered with Google. |
 | Webhook returns 400 | `STRIPE_WEBHOOK_SECRET` belongs to a different endpoint. The CLI and the dashboard issue different secrets. |
 | Paid but no bundle appeared | Check `wrangler tail` during the payment. The webhook is the only thing that grants bundles; the success redirect deliberately grants nothing. |
-| Analysis stuck on "Processing" | The sweeper runs once a minute. If it is still stuck after a few minutes, check `wrangler tail` and the `status` / `error_message` columns. After 3 attempts a job is marked `failed`. |
+| Analysis stuck on "Processing" | The sweeper runs once a minute. If it is still stuck after a few minutes, check `wrangler tail` and the `status` / `error_message` columns. After 3 attempts a job is marked `failed` and the bundle is refunded. |
+| Upload rejected at 413 | Over `MAX_UPLOAD_BYTES`. Workers KV will not store a value above 25 MiB, so this ceiling is not raisable much. |
+| A clip stopped playing after a month | `VIDEO_TTL_DAYS` expired it. Raise it, or accept it — the alternative is storage that grows until it leaves the free tier. |
 | `Error 1102: Worker exceeded resource limits` | A page exceeded the free plan's 10ms CPU. Isolates tolerate infrequent overages; if it is persistent, the admin page with a very large queue is the likely culprit. |
 | Analyses refused with 429 | `DAILY_ANALYSIS_CAP` reached. Raise it, or set `0`, and check your Gemini quota first. |

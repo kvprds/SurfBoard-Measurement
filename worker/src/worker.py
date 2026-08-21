@@ -8,8 +8,11 @@ but two are handled before ASGI ever sees them:
 
 Both move a whole video. Going through ASGI would pull the body into Python
 memory, and a Worker has 128MB — one clip is enough to kill the isolate. Handled
-here, the bytes stay a ReadableStream and pass straight between the socket and
-R2 without ever being materialised.
+here, the bytes stay a JavaScript object and are never converted into Python.
+
+Where those bytes go is src/storage.py, which is a deliberate seam: it is
+Workers KV today because R2 wants a payment card on file, and swapping it is a
+one-file change.
 
 The `scheduled` handler at the bottom is what replaced threading.Thread:
 a Cron Trigger sweeping a job table in D1. Cloudflare Queues would be the
@@ -27,6 +30,7 @@ from workers import Response, WorkerEntrypoint
 import auth
 import db as dbx
 import gemini
+import storage
 from app import app
 from httpjs import to_js
 from mailer import send_email
@@ -77,10 +81,11 @@ class Default(WorkerEntrypoint):
     # -- streaming upload ---------------------------------------------------
 
     async def _upload_video(self, request, url, surfer_id: int):
-        """Stream one clip from the browser into R2.
+        """Take one clip from the browser and hand it to the video store.
 
-        `request.body` is a ReadableStream and is handed to R2 untouched, so a
-        200MB file costs the same memory as a 200KB one.
+        The bytes stay a JavaScript ArrayBuffer throughout and are never
+        converted into Python, so a 20MB clip costs 20MB rather than several
+        times that inside Pyodide.
         """
         env = self.env
         session = _session_from(request, env)
@@ -125,24 +130,33 @@ class Default(WorkerEntrypoint):
         # crafted name reach across into another user's prefix.
         key = f"videos/{email}/{surfer_id}/{secrets.token_hex(8)}"
 
-        try:
-            stored = await env.VIDEOS.put(
-                key,
-                request.body,
-                to_js({"httpMetadata": {"contentType": content_type}}),
+        # Read the body as a JS ArrayBuffer. With R2 this was a ReadableStream
+        # that never landed anywhere, but KV needs the whole value, and holding
+        # it lets the real size be checked before the write instead of failing
+        # partway through. The buffer stays a JS object -- it is never converted
+        # into Python bytes, which would multiply the cost inside Pyodide.
+        buffer = await request.js_object.arrayBuffer()
+        if int(buffer.byteLength) > max_bytes:
+            return _json_response(
+                {"detail": f"That file is larger than the {max_bytes // (1024 * 1024)}MB limit."},
+                413,
             )
+
+        try:
+            stored_size = await storage.store_for(env).put(key, buffer, content_type)
+        except ValueError as exc:
+            return _json_response({"detail": str(exc)}, 413)
         except Exception as exc:  # noqa: BLE001
-            print(f"R2 upload failed for {key}: {exc}")
+            print(f"Video store failed for {key}: {exc}")
             return _json_response({"detail": "Could not store the video."}, 502)
 
-        stored_size = int(getattr(stored, "size", 0) or size or 0)
         await dbx.add_video(database, surfer_id, key, content_type, stored_size)
         return _json_response({"stored": True, "bytes": stored_size})
 
     # -- streaming playback -------------------------------------------------
 
     async def _serve_video(self, request, video_id: int):
-        """Play a clip back, streamed from R2.
+        """Play a clip back, streamed from the video store.
 
         web.py served any video to anyone who guessed an id — there was no check
         at all on this route. Access is enforced here: the owner, or the admin.
@@ -166,29 +180,21 @@ class Default(WorkerEntrypoint):
         if surfer["user_email"] != email and not is_admin:
             return Response("Not found.", status=404)
 
-        # Forward Range so the browser's video scrubber works without pulling
-        # the whole file.
-        options = {}
-        range_header = request.headers.get("Range")
-        if range_header:
-            options["range"] = js.Headers.new([["range", range_header]])
-
-        obj = await env.VIDEOS.get(video["object_key"], to_js(options) if options else None)
-        if obj is None:
-            return Response("No Data", status=404)
+        # No Range handling here. R2 could serve a byte range, so a browser
+        # could seek into a clip without downloading it; KV returns the whole
+        # value or nothing. At the 20MB cap the browser just fetches it all and
+        # seeks locally, which is fine, but it is a real capability that was
+        # lost in the move off R2.
+        try:
+            stream = await storage.store_for(env).open(video["object_key"])
+        except storage.VideoMissing:
+            return Response("This clip is no longer available.", status=404)
 
         headers = js.Headers.new()
-        obj.writeHttpMetadata(headers)
-        headers.set("Content-Length", str(obj.size))
+        headers.set("Content-Type", video["content_type"] or "video/mp4")
         headers.set("Cache-Control", "private, max-age=3600")
-        if range_header and getattr(obj, "range", None):
-            headers.set(
-                "Content-Range",
-                f"bytes {obj.range.offset}-{obj.range.offset + obj.range.length - 1}/{obj.size}",
-            )
-
-        status = 206 if (range_header and getattr(obj, "range", None)) else 200
-        return js.Response.new(obj.body, to_js({"status": status, "headers": headers}))
+        headers.set("Accept-Ranges", "none")
+        return js.Response.new(stream, to_js({"status": 200, "headers": headers}))
 
     # -- cron sweeper -------------------------------------------------------
 
@@ -223,9 +229,24 @@ class Default(WorkerEntrypoint):
             )
         except Exception as exc:  # noqa: BLE001
             retrying = await dbx.release_job(database, job["id"], str(exc))
+            if retrying:
+                print(f"Session {job['id']} failed: {exc} — back in the queue.")
+                return
+
+            # Out of attempts. The surfer paid for an analysis they are not
+            # going to get, so give the bundles back before giving up. Any clip
+            # still attached is one that was never successfully analysed.
+            leftover = await dbx.videos_for_surfer(database, job["id"])
+            if leftover:
+                await dbx.adjust_bundles(
+                    database, job["user_email"], job["bundle_used"], len(leftover)
+                )
+                video_store = storage.store_for(env)
+                for video in leftover:
+                    await video_store.delete(video["object_key"])
             print(
-                f"Session {job['id']} failed: {exc} — "
-                + ("back in the queue." if retrying else "giving up after max attempts.")
+                f"Session {job['id']} failed permanently: {exc} — "
+                f"refunded {len(leftover)} bundle(s)."
             )
 
     async def _analyse_session(self, job: dict, env=None) -> None:
@@ -267,10 +288,7 @@ class Default(WorkerEntrypoint):
                 # Not surfing (or the call failed): refund and drop the clip, as
                 # the shop page promises.
                 refunds += 1
-                try:
-                    await env.VIDEOS.delete(video["object_key"])
-                except Exception as exc:  # noqa: BLE001
-                    print(f"Could not delete rejected clip {video['object_key']}: {exc}")
+                await storage.store_for(env).delete(video["object_key"])
                 await dbx.delete_video(database, video["id"])
             else:
                 accepted += 1
@@ -305,17 +323,20 @@ class Default(WorkerEntrypoint):
 
     async def _analyse_one(self, env, api_key, model, video, surfer, examples) -> dict:
         """Upload one clip to Gemini, ask for the sizing, then clean up."""
-        obj = await env.VIDEOS.get(video["object_key"])
-        if obj is None:
-            print(f"Clip {video['object_key']} missing from R2.")
-            return {"is_surfing": False}
+        # Deliberately outside the try below. A clip that cannot be read is not
+        # evidence of anything about the footage, and KV is eventually
+        # consistent -- a video written seconds ago may not be visible in this
+        # location yet. Letting VideoMissing propagate turns it into a retry on
+        # the next sweep. Catching it here and returning "not surfing" would
+        # refund and delete a session that was perfectly fine.
+        stream = await storage.store_for(env).open(video["object_key"])
 
         file_name = None
         try:
             uploaded = await gemini.upload_stream(
                 api_key,
-                stream=obj.body,
-                size_bytes=int(obj.size),
+                stream=stream,
+                size_bytes=int(video["size_bytes"]),
                 mime_type=video["content_type"],
                 display_name=f"surf-{video['id']}",
             )

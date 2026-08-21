@@ -4,9 +4,9 @@ The Flask app used the `google-genai` SDK. That SDK cannot run on Workers, so
 this speaks the same Files + generateContent endpoints directly.
 
 The important difference from the original is how the bytes move. A Worker gets
-128MB of memory, so `video_bytes = r2_object.read()` would kill the isolate on
-any real clip. Instead the R2 object's ReadableStream is handed straight to
-fetch() as the request body, and the video flows R2 -> Gemini without the Worker
+128MB of memory, so reading a clip into a Python `bytes` would be expensive at
+best. Instead the stored clip's ReadableStream is handed straight to fetch() as
+the request body, and the video flows from storage to Gemini without the Worker
 ever materialising it.
 """
 
@@ -74,7 +74,7 @@ async def upload_stream(
     """Push a video into the Gemini Files API using the resumable protocol.
 
     Two calls: one to open an upload session and get a URL, one to send the
-    bytes. `stream` is the R2 object's body and is never read into Python.
+    bytes. `stream` comes from src/storage.py and is never read into Python.
     """
     start = await fetch_raw(
         f"{API_ROOT}/upload/v1beta/files?key={api_key}",

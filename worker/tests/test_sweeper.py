@@ -11,9 +11,10 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "src"))
 import asyncio
 
-import fakes  # noqa: F401  installs the runtime stubs
+import fakes  # installs the runtime stubs
 import db as dbx
 import gemini
+import storage
 import worker as W
 
 SCHEMA = open(os.path.join(os.path.dirname(_HERE), "schema.sql")).read()
@@ -65,7 +66,7 @@ async def seed(env, bundle="ai", n_videos=1, queued=True):
                                   bundle_used=bundle)
     for i in range(n_videos):
         key = f"videos/{email}/{sid}/{i}"
-        await env.VIDEOS.put(key, b"v" * 2048)
+        await storage.store_for(env).put(key, fakes.FakeArrayBuffer(b"v" * 2048), "video/mp4")
         await dbx.add_video(D, sid, key, "video/mp4", 2048)
     await dbx.spend_bundle(D, email, bundle, n_videos)
     if queued:
@@ -198,6 +199,71 @@ check("formats into prompt text", "Coach reasoning here." in gemini.format_examp
 
 print("\n=== daily cap query ===")
 check("counts today's sessions", run(dbx.analyses_today(D)) == 1, run(dbx.analyses_today(D)))
+
+print("\n=== Workers KV specifics ===")
+env = fakes.FakeEnv(SCHEMA)
+store = storage.store_for(env)
+run(store.put("k1", fakes.FakeArrayBuffer(b"x" * 4096), "video/mp4"))
+check("write sets an expiry so storage cannot creep", env.VIDEOS.ttls["k1"] == 30 * 24 * 3600,
+      env.VIDEOS.ttls["k1"])
+check("content type is kept as key metadata",
+      env.VIDEOS.meta["k1"]["contentType"] == "video/mp4", env.VIDEOS.meta["k1"])
+check("reads back", run(store.open("k1")) is not None)
+
+try:
+    run(store.put("big", fakes.FakeArrayBuffer(b"x" * (26 * 1024 * 1024)), "video/mp4"))
+    check("oversize value refused before the write", False, "no error raised")
+except ValueError as exc:
+    check("oversize value refused before the write", "caps a value" in str(exc), exc)
+
+try:
+    run(store.put("empty", fakes.FakeArrayBuffer(b""), "video/mp4"))
+    check("empty upload refused", False, "no error raised")
+except ValueError:
+    check("empty upload refused", True)
+
+try:
+    run(store.open("never-written"))
+    check("a missing key raises VideoMissing, never returns None", False, "no error raised")
+except storage.VideoMissing:
+    check("a missing key raises VideoMissing, never returns None", True)
+
+print("\n=== eventual consistency must not look like 'not surfing' ===")
+# KV writes can take up to 60s to be visible in another location. If the sweeper
+# reads before then, the clip is absent — and treating that as a verdict would
+# refund and delete a session that was perfectly fine.
+env = fakes.FakeEnv(SCHEMA); stub_gemini([SURFING])
+D, sid, email = run(seed(env))
+spent = run(dbx.get_inventory(D, email))["ai_bundles"]
+key = run(dbx.videos_for_surfer(D, sid))[0]["object_key"]
+env.VIDEOS.hidden.add(key)          # written, not yet visible here
+
+tick(env)
+row = run(dbx.get_surfer(D, sid))
+check("session survives an invisible clip", row is not None)
+check("  ...requeued rather than judged", row["status"] == "queued", row["status"])
+check("  ...no bundle refunded yet", run(dbx.get_inventory(D, email))["ai_bundles"] == spent)
+check("  ...clip not deleted", key in env.VIDEOS.values)
+
+env.VIDEOS.hidden.discard(key)      # propagation catches up
+tick(env)
+row = run(dbx.get_surfer(D, sid))
+check("next sweep analyses it normally", row["status"] == "complete", row["status"])
+check("  ...recommendation written", row["rec_liters"] == 32.5)
+
+print("\n=== a clip that never appears is refunded, not silently lost ===")
+env = fakes.FakeEnv(SCHEMA); stub_gemini([SURFING] * 6)
+D, sid, email = run(seed(env))
+before = run(dbx.get_inventory(D, email))["ai_bundles"]
+key = run(dbx.videos_for_surfer(D, sid))[0]["object_key"]
+env.VIDEOS.hidden.add(key)
+for _ in range(dbx.MAX_ATTEMPTS + 1):
+    tick(env)
+    run(D.execute("UPDATE surfer SET claimed_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", sid))
+row = run(dbx.get_surfer(D, sid))
+check("gives up after MAX_ATTEMPTS", row["status"] == "failed", row["status"])
+check("  ...and refunds the surfer", run(dbx.get_inventory(D, email))["ai_bundles"] == before + 1,
+      run(dbx.get_inventory(D, email))["ai_bundles"])
 
 print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")
 sys.exit(1 if FAIL else 0)

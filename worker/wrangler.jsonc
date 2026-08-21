@@ -23,13 +23,20 @@
 
 	// --- Video bytes -------------------------------------------------------
 	// D1 rows cap out around 1MB, so the clips cannot live in the database.
-	// R2 is the object store, and its egress is free, which is what makes
-	// serving video back to the browser affordable.
-	//   npx wrangler r2 bucket create surfboard-videos
-	"r2_buckets": [
+	// R2 is the natural object store, but enabling it requires a payment card
+	// on the account even on the free tier, so this uses Workers KV instead --
+	// included in the Workers free plan, no card.
+	//
+	// KV is a config/cache store, not a blob store, and the trade is real: a
+	// 25 MiB ceiling per value and 1 GB per account. At the 20MB cap below that
+	// is roughly 50 clips, and VIDEO_TTL_DAYS expires them so storage never
+	// creeps up on you. src/storage.py is the seam -- swapping providers means
+	// replacing that one file.
+	//   npx wrangler kv namespace create VIDEOS
+	"kv_namespaces": [
 		{
 			"binding": "VIDEOS",
-			"bucket_name": "surfboard-videos"
+			"id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 		}
 	],
 
@@ -52,7 +59,8 @@
 		"SUPER_ADMIN_EMAIL": "you@example.com",
 		"EMAIL_FROM": "Surfing AI <onboarding@resend.dev>",
 		"GEMINI_MODEL": "gemini-2.5-flash",
-		"MAX_UPLOAD_BYTES": "26214400",
+		"MAX_UPLOAD_BYTES": "20971520",
+		"VIDEO_TTL_DAYS": "30",
 		"DAILY_ANALYSIS_CAP": "40"
 	}
 }

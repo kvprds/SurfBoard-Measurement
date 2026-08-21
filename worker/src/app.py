@@ -2,7 +2,7 @@
 
 Two things are worth knowing before reading further.
 
-**Where `env` comes from.** Bindings (D1, R2, the queue) hang off the Worker's
+**Where `env` comes from.** Bindings (D1, KV) hang off the Worker's
 `env`, which the ASGI adapter puts in the request scope. `_env(request)` is the
 only place that knowledge lives.
 
@@ -22,6 +22,7 @@ from starlette.datastructures import MutableHeaders
 import auth
 import db as dbx
 import payments
+import storage
 from templates import render
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
@@ -661,15 +662,12 @@ async def admin_delete(request: Request, surfer_id: int):
     if not surfer:
         return _redirect(request, "/admin")
 
-    # Drop the video objects too. R2 bills for what is stored, and these are
-    # the largest things this app keeps.
+    # Drop the stored clips too. They are by far the largest thing this app
+    # keeps, and the KV free tier is 1 GB for the whole account.
     videos = await dbx.videos_for_surfer(database, surfer_id)
-    bucket = _env(request).VIDEOS
+    video_store = storage.store_for(_env(request))
     for video in videos:
-        try:
-            await bucket.delete(video["object_key"])
-        except Exception as exc:  # noqa: BLE001
-            print(f"Could not delete R2 object {video['object_key']}: {exc}")
+        await video_store.delete(video["object_key"])
 
     await dbx.adjust_bundles(database, surfer["user_email"], surfer["bundle_used"], 1)
     await dbx.delete_surfer(database, surfer_id)

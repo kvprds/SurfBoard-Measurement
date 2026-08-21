@@ -4,7 +4,7 @@ Python Workers can use httpx or aiohttp, but every outbound call ultimately goes
 through the JavaScript fetch() the runtime provides. Calling it directly keeps
 the dependency list short and, more importantly, lets a `ReadableStream` be
 passed straight through as a request body — which is what makes it possible to
-push a video from R2 to Gemini without ever holding it in memory.
+push a stored video to Gemini without ever holding it in memory.
 """
 
 import json as _json

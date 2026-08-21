@@ -4,7 +4,9 @@
 These run off-platform: tests/fakes.py stubs the Worker runtime and backs the
 D1 binding with real SQLite, so schema.sql and every query in db.py and
 payments.py are genuinely executed. Requires: pip install fastapi jinja2 httpx
-python-multipart
+
+Deliberately no python-multipart: it is not in the Worker bundle either, so
+installing it here would hide the form parsing the deployed app really does.
 """
 import pathlib
 import subprocess

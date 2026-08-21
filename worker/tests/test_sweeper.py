@@ -265,5 +265,26 @@ check("gives up after MAX_ATTEMPTS", row["status"] == "failed", row["status"])
 check("  ...and refunds the surfer", run(dbx.get_inventory(D, email))["ai_bundles"] == before + 1,
       run(dbx.get_inventory(D, email))["ai_bundles"])
 
+print("\n=== the cron handler survives either calling convention ===")
+# A signature mismatch here is a TypeError raised before the body runs, once a
+# minute, silently, until someone opens `wrangler tail`. The runtime has passed
+# both (controller, env, ctx) and (controller) alone across beta releases, so
+# both are exercised.
+env = fakes.FakeEnv(SCHEMA)
+D, sid, email = run(seed(env))
+stub_gemini([SURFING])
+run(sweeper(env).scheduled(None, env, None))
+check("called as scheduled(controller, env, ctx)",
+      run(dbx.get_surfer(D, sid))["status"] != "queued")
+
+env = fakes.FakeEnv(SCHEMA)
+D, sid, email = run(seed(env))
+stub_gemini([SURFING])
+run(sweeper(env).scheduled(None))  # env read off self, as a newer runtime does
+check("called as scheduled(controller), env off self",
+      run(dbx.get_surfer(D, sid))["status"] != "queued")
+
+check("no tick raises when the queue is empty", run(sweeper(env).scheduled()) is None)
+
 print(f"\n{'=' * 46}\n  {PASS} passed, {FAIL} failed\n{'=' * 46}")
 sys.exit(1 if FAIL else 0)

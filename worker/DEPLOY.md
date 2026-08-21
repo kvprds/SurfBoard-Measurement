@@ -165,7 +165,7 @@ one in `.dev.vars`.
 ## Running the tests
 
 ```bash
-pip install fastapi jinja2 httpx python-multipart
+pip install fastapi jinja2 httpx
 python3 tests/run.py
 ```
 
@@ -227,4 +227,6 @@ supports range requests (so video seeking works properly), and it has no
 | Upload rejected at 413 | Over `MAX_UPLOAD_BYTES`. Workers KV will not store a value above 25 MiB, so this ceiling is not raisable much. |
 | A clip stopped playing after a month | `VIDEO_TTL_DAYS` expired it. Raise it, or accept it — the alternative is storage that grows until it leaves the free tier. |
 | `Error 1102: Worker exceeded resource limits` | A page exceeded the free plan's 10ms CPU. Isolates tolerate infrequent overages; if it is persistent, the admin page with a very large queue is the likely culprit. |
+| Every form POST 500s (`python-multipart ... must be installed`) | An old build. Forms are parsed by `_form_fields()` in `app.py` now, with no such dependency — redeploy from `main`. |
+| `TypeError: Default.scheduled() takes N positional arguments` once a minute | The cron handler's signature drifted from what the runtime passes. `scheduled(self, controller=None, env=None, ctx=None)` accepts every shape the beta runtime has used; redeploy from `main`. |
 | Analyses refused with 429 | `DAILY_ANALYSIS_CAP` reached. Raise it, or set `0`, and check your Gemini quota first. |

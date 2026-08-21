@@ -55,7 +55,7 @@
 	// Non-secret configuration. Anything sensitive goes through
 	// `wrangler secret put` instead — see DEPLOY.md.
 	"vars": {
-		"APP_BASE_URL": "https://surfboard-measurement.workers.dev",
+		"APP_BASE_URL": "https://surfboard-measurement.tomer-berger08.workers.dev",
 		"SUPER_ADMIN_EMAIL": "you@example.com",
 		"EMAIL_FROM": "Surfing AI <onboarding@resend.dev>",
 		"GEMINI_MODEL": "gemini-2.5-flash",

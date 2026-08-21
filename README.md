@@ -1,5 +1,6 @@
 # 🏄 SurfBoard-Measurement
 
+[![Live demo](https://img.shields.io/badge/live_demo-open_the_app-0ea5e9?style=for-the-badge&logo=cloudflare&logoColor=white)](https://surfboard-measurement.tomer-berger08.workers.dev/dashboard)
 ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![Cloudflare](https://img.shields.io/badge/Cloudflare_Workers-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)
 ![D1](https://img.shields.io/badge/Cloudflare_D1-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)
@@ -9,6 +10,8 @@
 ![Stripe](https://img.shields.io/badge/Stripe-635BFF?style=for-the-badge&logo=stripe&logoColor=white)
 
 **A full-stack web app that recommends surfboard dimensions from a surfer's video, using Google's Gemini multimodal AI — deployed on Cloudflare's edge, entirely on free tiers.**
+
+🔗 **Live app:** <https://surfboard-measurement.tomer-berger08.workers.dev/dashboard>
 
 > ⚠️ Software engineering **learning project**. Recommendations are AI-generated and are not professional sizing advice.
 > Payments run in **Stripe test mode** — the full checkout flow works, no money moves.
@@ -86,11 +89,13 @@ uv run pywrangler dev          # local D1 and KV; nothing touches production
 
 ```bash
 cd worker
-pip install fastapi jinja2 httpx python-multipart
+pip install fastapi jinja2 httpx
 python3 tests/run.py
 ```
 
-116 tests, run off-platform. `tests/fakes.py` stubs the Worker runtime and backs the D1 binding with **real SQLite**, so `schema.sql` and every query in `db.py` and `payments.py` are genuinely executed — including webhook signature rejection, replay rejection, the idempotency behaviour that stops one payment becoming five bundles, the sweeper's claim-and-retry semantics under two workers racing for the same job, and KV's eventual consistency not being mistaken for a missing video.
+123 tests, run off-platform. `tests/fakes.py` stubs the Worker runtime and backs the D1 binding with **real SQLite**, so `schema.sql` and every query in `db.py` and `payments.py` are genuinely executed — including webhook signature rejection, replay rejection, the idempotency behaviour that stops one payment becoming five bundles, the sweeper's claim-and-retry semantics under two workers racing for the same job, and KV's eventual consistency not being mistaken for a missing video.
+
+The suite deliberately runs **without** `python-multipart` installed, because the Worker bundle does not have it either — that mismatch is exactly how a 500 on every form POST once reached production while the tests stayed green.
 
 ## 📂 What's in here
 

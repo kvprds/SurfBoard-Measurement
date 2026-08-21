@@ -14,6 +14,7 @@ has 128MB. Handling them at the raw-request level lets the bytes stream.
 
 import json
 import secrets
+from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -32,6 +33,11 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 CSRF_EXEMPT = {"/webhooks/stripe"}
 
 SKILL_LEVELS = {"Beginner", "Intermediate", "Advanced", "Pro", "Unspecified"}
+
+# The only encoding a form here ever arrives in. A browser sends this for every
+# <form> in templates.py; nothing posts multipart, because video uploads bypass
+# ASGI entirely and arrive as raw PUT bodies (see worker.py).
+URLENCODED = "application/x-www-form-urlencoded"
 
 
 # ---------------------------------------------------------------------------
@@ -137,8 +143,9 @@ class SecurityMiddleware:
             submitted = request.headers.get("x-csrf-token")
             if not submitted:
                 body = await request.body()
-                form = await Request(scope, _replay(body)).form()
-                submitted = form.get("_csrf_token")
+                submitted = _form_fields(body, request.headers.get("content-type", "")).get(
+                    "_csrf_token"
+                )
                 receive = _replay(body)  # hand the route an unread body
 
             if not auth.csrf_ok(session, submitted):
@@ -161,6 +168,36 @@ def _replay(body: bytes):
         return {"type": "http.request", "body": body, "more_body": False}
 
     return receive
+
+
+def _form_fields(body: bytes, content_type: str) -> dict[str, str]:
+    """Parse an urlencoded form body, without python-multipart.
+
+    Starlette's `Request.form()` asserts that python-multipart is installed
+    before it will parse anything — including a plain urlencoded body, which
+    needs none of it. That package is not in the Worker bundle, so on the
+    deployed app every form POST (Buy, admin, the stats wizard) died on that
+    assertion with a 500 while the tests passed, because off-platform the
+    package happened to be installed. Parsing the body here costs a few lines
+    and takes the dependency — and that whole class of drift — out of the app.
+
+    Anything that is not urlencoded yields no fields rather than raising. No
+    route accepts a multipart body, so the CSRF gate turns such a request into
+    a 403 instead of an exception.
+    """
+    if content_type.split(";")[0].strip().lower() != URLENCODED:
+        return {}
+
+    fields: dict[str, str] = {}
+    for key, value in parse_qsl(body.decode("utf-8", "replace"), keep_blank_values=True):
+        # First value wins, which is what Starlette's FormData.get() returns.
+        fields.setdefault(key, value)
+    return fields
+
+
+async def _form(request: Request) -> dict[str, str]:
+    """The `await request.form()` replacement used by every route below."""
+    return _form_fields(await request.body(), request.headers.get("content-type", ""))
 
 
 def _add_security_headers(send):
@@ -298,7 +335,7 @@ async def send_zoom_message(request: Request):
     if not session.get("email"):
         return _redirect(request, "/")
 
-    form = await request.form()
+    form = await _form(request)
     message = (form.get("message") or "").strip()
     if message:
         await dbx.add_zoom_message(_database(request), session["email"], "user", message[:2000])
@@ -323,7 +360,7 @@ async def new_analysis_submit(request: Request):
     if not session.get("email"):
         return _redirect(request, "/")
 
-    form = await request.form()
+    form = await _form(request)
 
     def number(field: str) -> float:
         try:
@@ -582,7 +619,7 @@ async def admin_reply_zoom(request: Request):
     if not _is_admin(request, session):
         return _redirect(request, "/")
 
-    form = await request.form()
+    form = await _form(request)
     target, message = (form.get("target_email") or "").strip(), (form.get("message") or "").strip()
     if target and message:
         await dbx.add_zoom_message(_database(request), target, "admin", message[:2000])
@@ -604,7 +641,7 @@ async def admin_decide(request: Request, surfer_id: int):
         return _error_page(request, session, "Not found",
                            "That session no longer exists.", back="/admin", status=404)
 
-    form = await request.form()
+    form = await _form(request)
     try:
         rec = {
             "rec_feet": int(form.get("ft")),
@@ -637,7 +674,7 @@ async def admin_update_inventory(request: Request):
     if not _is_admin(request, session):
         return _redirect(request, "/")
 
-    form = await request.form()
+    form = await _form(request)
     target = (form.get("email") or "").strip().lower()
     kind = form.get("bundle_type")
     try:

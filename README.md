@@ -40,12 +40,17 @@ Two Cloudflare services do the work, plus two bindings that the app cannot funct
 | --- | --- | --- |
 | **Cloudflare Python Workers** | Every route. FastAPI + Jinja2 on Pyodide. | Free — 100k req/day |
 | **Cloudflare D1** | The dataset — sessions, recommendations, inventory, chat, purchase ledger, and the job queue. | Free — 5GB |
-| **Cloudflare R2** | Video files. A D1 row caps out around 1MB, so clips cannot live in the database. | Free — 10GB, egress always free |
+| **Workers KV** | Video files. A D1 row caps out around 1MB, so clips cannot live in the database. | Free — 1GB, no card |
 | **Cron Trigger** | Sweeps queued analyses once a minute. | Free — 5 per account |
 
-Video never enters Python memory on any leg — browser → R2 → Gemini → browser all stream, because a Worker has 128MB and one clip can exceed it.
+Video bytes never become Python objects — they stay on the JavaScript side of the Pyodide boundary from browser to storage to Gemini and back, because a Worker gets 128MB.
 
-**No paid plan required.** Cloudflare Queues was the first home for the async analysis and is the natural fit, but it is the one service here with no free tier — so the job lives in a D1 table swept by a Cron Trigger, with the same exactly-once claiming, retries, and dead-worker recovery. Rendering the heaviest page measures ~0.5ms against the free plan's 10ms CPU budget.
+**No paid plan, and no payment card anywhere.** Two services were swapped out to get there, and both cost something real:
+
+- **Cloudflare Queues → a D1 job table swept by a Cron Trigger.** Queues is the one service here with no free tier. The replacement keeps exactly-once claiming, retries, and dead-worker recovery; an analysis just waits up to a minute to start.
+- **R2 → Workers KV.** R2 is the right tool for video, but enabling it puts a card on your Cloudflare account. KV caps a value at 25 MiB, holds 1GB free, has no range requests, and is eventually consistent — which meant teaching the sweeper that a clip it cannot read yet is a *retry*, not a verdict. [`src/storage.py`](worker/src/storage.py) is the seam; swapping to R2, Supabase or Cloudinary is a rewrite of that one file.
+
+Rendering the heaviest page measures ~0.5ms against the free plan's 10ms CPU budget.
 
 📖 **[ARCHITECTURE.md](worker/ARCHITECTURE.md)** — every change from the Flask original and why it was forced.
 
@@ -72,10 +77,10 @@ Stripe's fee is roughly 150× the AI cost. On a $10 sale, payment processing tak
 
 ```bash
 cd worker
-uv run pywrangler dev          # local D1 and R2; nothing touches production
+uv run pywrangler dev          # local D1 and KV; nothing touches production
 ```
 
-📖 **[DEPLOY.md](worker/DEPLOY.md)** — the full free-tier allowance table, creating the D1 database and R2 bucket, every secret and where it comes from, and the Stripe test-mode webhook setup.
+📖 **[DEPLOY.md](worker/DEPLOY.md)** — the full free-tier allowance table, creating the D1 database and KV namespace, every secret and where it comes from, and the Stripe test-mode webhook setup.
 
 ## ✅ Tests
 
@@ -85,7 +90,7 @@ pip install fastapi jinja2 httpx python-multipart
 python3 tests/run.py
 ```
 
-102 tests, run off-platform. `tests/fakes.py` stubs the Worker runtime and backs the D1 binding with **real SQLite**, so `schema.sql` and every query in `db.py` and `payments.py` are genuinely executed — including webhook signature rejection, replay rejection, the idempotency behaviour that stops one payment becoming five bundles, and the sweeper's claim-and-retry semantics under two workers racing for the same job.
+116 tests, run off-platform. `tests/fakes.py` stubs the Worker runtime and backs the D1 binding with **real SQLite**, so `schema.sql` and every query in `db.py` and `payments.py` are genuinely executed — including webhook signature rejection, replay rejection, the idempotency behaviour that stops one payment becoming five bundles, the sweeper's claim-and-retry semantics under two workers racing for the same job, and KV's eventual consistency not being mistaken for a missing video.
 
 ## 📂 What's in here
 
@@ -97,6 +102,7 @@ python3 tests/run.py
 | `worker/src/auth.py` | **Current** | Signed-cookie sessions, CSRF, Google OIDC. |
 | `worker/src/payments.py` | **Current** | Stripe Checkout and the webhook. |
 | `worker/src/gemini.py` | **Current** | Gemini Files + generateContent over REST. |
+| `worker/src/storage.py` | **Current** | Where clips live. The one file to change to swap storage providers. |
 | `worker/src/templates.py` | **Current** | The Jinja2 templates. |
 | `worker/schema.sql` | **Current** | The D1 schema. |
 | `SurfBoard-Measurement/web.py` | Reference | The original single-file Flask app. Kept as the reference implementation; not deployed. |
@@ -108,7 +114,9 @@ python3 tests/run.py
 
 - This is a learning project — recommendations are AI-generated and **not** professional sizing advice.
 - Runs entirely on **free tiers** — no Cloudflare, Stripe or Google subscription.
-- Uploads are capped at **25MB** to keep several hundred clips inside R2's 10GB free tier; Cloudflare's own ceiling is 100MB, down from the Flask app's 500MB.
+- Uploads are capped at **20MB**, under Workers KV's hard 25 MiB per-value ceiling — down from the Flask app's 500MB.
+- Storage holds roughly **50 clips**, and clips expire after 30 days so it never grows past KV's 1GB free tier.
+- No video seeking: KV cannot serve byte ranges, so the browser downloads a clip whole before it can scrub.
 - Analyses are capped at **40/day** to stay inside Gemini's free quota, and start up to a minute late because that is the fastest a Cron Trigger fires.
 - **Python Workers are in open beta**; the `python_workers` compatibility flag is required.
 - Built and tested with the guidance of an Olympic surfing coach.

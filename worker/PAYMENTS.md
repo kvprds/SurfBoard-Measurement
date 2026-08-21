@@ -163,7 +163,7 @@ most.
 | Customer pays | $10.00 | $35.00 | $99.00 |
 | Stripe fee | −$0.59 | −$1.32 | −$3.17 |
 | Gemini analysis | −$0.01 | −$0.01 | — |
-| Cloudflare (marginal) | −$0.00 | −$0.00 | −$0.00 |
+| Cloudflare | free tier | free tier | free tier |
 | **You keep** | **$9.40** | **$33.67** | **$95.83** |
 | Effective fee | 5.9% | 3.8% | 3.2% |
 
@@ -197,25 +197,25 @@ factor of roughly 150.
 
 Per analysis, at published rates:
 
-| | Usage | Cost |
-| --- | --- | ---: |
-| Workers requests | ~20 | $0.000006 |
-| D1 rows read/written | ~30 | $0.00003 |
-| R2 storage | 50MB for a month | $0.00075 |
-| R2 Class A (the upload) | 1 | $0.0000045 |
-| Queues | 3 operations | $0.0000012 |
+| | Usage | Notes |
+| --- | --- | --- |
+| Workers requests | ~20 | 100,000/day free |
+| D1 rows read/written | ~30 | 5M reads/day free |
+| Workers KV | 1 write, a few reads | 1,000 writes/day free |
+| KV storage | 20MB, expiring after 30 days | 1 GB free |
+| Cron Trigger | 1,440 invocations/day | free |
 
-Under a tenth of a cent, and at portfolio-site volume the **free allowances
-absorb all of it** — there is no Cloudflare bill at all. See
-[DEPLOY.md](DEPLOY.md#what-it-costs-nothing) for the allowance table. R2 egress
-being free is what keeps video playback from ever appearing on this list.
+Every line sits inside a free allowance, so at portfolio-site volume **there is
+no Cloudflare bill at all** — and no payment card on the account either, which
+is why storage is Workers KV rather than R2. See
+[DEPLOY.md](DEPLOY.md#what-it-costs-nothing) for the full table.
 
 ### Break-even
 
 There is no fixed monthly cost to recover, so the first sale is profitable.
 Cloudflare only starts charging if you leave the free tier — realistically that
-means exceeding R2's 10GB of stored video (roughly 400 clips at the 25MB cap) or
-100,000 requests a day. Long before either, Gemini's free quota of a few hundred
+means exceeding KV's 1 GB of stored video (roughly 50 clips at the 20MB cap, and
+they expire after 30 days) or 100,000 requests a day. Long before either, Gemini's free quota of a few hundred
 requests per day would be the thing you outgrew, and paid Gemini is still under
 a cent per analysis.
 

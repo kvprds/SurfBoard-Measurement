@@ -2,10 +2,12 @@
 
 The request was to split this into two native Cloudflare services: **D1** for
 the dataset and **Python Workers** for the routes. That is the shape of it, plus
-an R2 bucket for video, which is load-bearing rather than optional.
+somewhere to keep video, which is load-bearing rather than optional.
 
-It all runs on **free plans**. That constraint shaped one design decision in
-particular — see [the sweeper](#the-sweeper-is-a-queue-you-can-read).
+It all runs on **free plans, with no payment card on any account**. That
+constraint shaped two design decisions, and both cost something real:
+[the sweeper](#the-sweeper-is-a-queue-you-can-read) and
+[storing video in KV](#video-lives-in-kv-which-is-not-a-blob-store).
 
 ```
                     ┌──────────────────────────────────┐
@@ -18,7 +20,7 @@ particular — see [the sweeper](#the-sweeper-is-a-queue-you-can-read).
                     └───┬───────────┬──────────────┬───┘
                         │           │              │
               ┌─────────▼─┐   ┌─────▼────┐         │
-              │    D1     │   │    R2    │         ▼
+              │    D1     │   │Workers KV│         ▼
               │  dataset  │   │  videos  │   Gemini · Stripe
               │  + jobs   │   └──────────┘        · Resend
               └───────────┘
@@ -31,8 +33,9 @@ written out as DDL, essentially unchanged.
 **Python Workers** runs all the routes. FastAPI is supported natively — the
 runtime ships its own ASGI server, so there is no uvicorn.
 
-**R2** exists because a D1 row caps out around 1MB. Video cannot live in the
-database. R2's egress is free, which is what keeps playback off the cost sheet.
+**Workers KV** holds the video, because a D1 row caps out around 1MB. R2 is the
+right tool for this and was the first implementation, but enabling R2 puts a
+payment card on the Cloudflare account. KV needs no card — at a price, below.
 
 **A Cron Trigger** fires `scheduled()` once a minute to run queued analyses,
 because a Worker cannot keep a thread alive past its response. Cloudflare Queues
@@ -47,7 +50,7 @@ here with no free tier.
 | --- | --- | --- |
 | SQLAlchemy ORM | `src/db.py`, prepared statements | D1 speaks SQL over a binding. There is no dialect for it. |
 | `sqlite:///surfboard_ai.db` | D1 | The Worker filesystem is read-only and not shared between isolates. |
-| `f.save(filepath)` to `uploads/` | Streamed into R2 | Same reason, plus the 128MB memory ceiling. |
+| `f.save(filepath)` to `uploads/` | Workers KV, via `src/storage.py` | Same reason, plus the 128MB memory ceiling. |
 | `threading.Thread` | D1 job table + Cron Trigger | Threads die when the response is sent. Queues would fit, but it is paid-only. |
 | `google-genai` SDK | REST via `fetch` | The SDK cannot run under Pyodide. |
 | `smtplib` to Gmail:465 | Resend HTTPS API | Workers cannot open a raw TCP socket to SMTP. |
@@ -59,27 +62,82 @@ here with no free tier.
 
 ---
 
-## Three things worth reading the code for
+## Four things worth reading the code for
 
-### Video never enters Python memory
+### Video never becomes a Python object
 
-A Worker gets 128MB. A single clip can exceed that, so the bytes are never
-materialised on either leg of the journey:
+A Worker gets 128MB, and Pyodide makes Python objects expensive. Video bytes stay
+on the JavaScript side of the boundary the whole way through:
 
 - **Upload.** `PUT /api/analysis/{id}/video` is intercepted in `worker.py`
   *before* the ASGI app sees it. Routing it through FastAPI would read the body
-  into Python; handled at the raw request level, `request.body` stays a
-  `ReadableStream` and goes straight to `env.VIDEOS.put()`.
-- **To Gemini.** The consumer opens the R2 object and hands `obj.body` to
-  `fetch()` as the request body of a resumable upload. R2 → Gemini, nothing in
-  between.
-- **Playback.** `GET /video_serve/{id}` returns the R2 stream directly, and
-  forwards `Range` so scrubbing works without pulling the whole file.
+  into Python; handled at the raw request level it is a JS `ArrayBuffer` that
+  goes straight to the store. (With R2 this was a `ReadableStream` and nothing
+  was held whole at all — see the KV section below for why that changed.)
+- **To Gemini.** The sweeper opens the stored clip as a `ReadableStream` and
+  hands it to `fetch()` as the request body of a resumable upload. Storage →
+  Gemini, nothing in between.
+- **Playback.** `GET /video_serve/{id}` returns that stream directly to the
+  browser.
 
-This is also why the upload cap moved from 500MB to 100MB: that is Cloudflare's
-request body limit on Free and Pro plans, and it is enforced before your code
-runs. Beyond it you need presigned URLs straight to R2, which is a bigger
-change than this migration needed.
+The upload cap fell from the Flask app's 500MB to 20MB across two steps: 100MB
+is Cloudflare's request-body limit on Free and Pro plans, enforced before your
+code runs, and 25 MiB is Workers KV's per-value ceiling, which is the binding
+constraint now.
+
+### Video lives in KV, which is not a blob store
+
+R2 is the correct home for uploaded video and this was written against it first.
+It is not used because turning R2 on requires a payment card on the Cloudflare
+account, even to stay inside the free tier. Workers KV is included in the
+Workers free plan with no card.
+
+KV is a configuration and cache store. Using it for video works at this scale
+and is honestly a misuse, so `src/storage.py` exists as a seam: it is the only
+file that knows where bytes live, and swapping providers is a rewrite of that
+one file.
+
+What the substitution costs:
+
+| | R2 | Workers KV |
+| --- | --- | --- |
+| Max object | 5 TB | **25 MiB** |
+| Free storage | 10 GB | **1 GB** (~50 clips at the 20MB cap) |
+| Free writes | 1M Class A/month | **1,000/day** |
+| Range requests | Yes | **No** — no seeking into a partial download |
+| Consistency | Strong | **Eventual**, up to 60s between locations |
+| Expiry | Lifecycle rules | `expirationTtl`, per key |
+| Payment card | Required | Not required |
+
+Two of those changed the code, not just the config.
+
+**Uploads buffer now.** R2 took the request body as a `ReadableStream`, so a
+clip passed from socket to bucket without ever existing whole. KV needs the
+complete value, so `worker.py` reads an `ArrayBuffer` instead. The bytes stay a
+JavaScript object and are never converted into Python — 20MB costs 20MB, well
+inside the Worker's 128MB — and holding it buys something back: the real size is
+checked *before* the write rather than failing partway through it.
+
+**A missing clip is no longer evidence.** This is the subtle one. Under R2, `get`
+returning None meant the object was gone. Under KV it can also mean *not here
+yet* — a write is visible immediately where it was made, but takes up to 60
+seconds to reach other locations, and the sweeper may well run somewhere else.
+
+The old code treated a missing video as `{"is_surfing": False}`, which refunds
+the bundle and deletes the session. Under KV that would quietly destroy perfectly
+good sessions whenever propagation lost a race with the cron. So `storage.open()`
+raises `VideoMissing` rather than returning None, the sweeper lets it propagate,
+and the job is retried on the next tick instead of judged. After `MAX_ATTEMPTS`
+the session fails *and the bundle is refunded* — the surfer is never charged for
+storage we could not read.
+
+`tests/test_sweeper.py` models this directly: it hides a key from `get` while
+leaving it written, and asserts the session survives, is requeued, keeps its
+clip, and completes normally once propagation catches up.
+
+The last thing KV gives back is `expirationTtl`, which R2 has no equivalent for.
+Every clip carries an expiry, so storage plateaus instead of growing until it
+falls out of the free tier. For a demo that is the right default.
 
 ### The sweeper is a queue you can read
 
@@ -198,10 +256,13 @@ Small things, all in code that had to be touched anyway:
   replaced by the sweeper above.
 - **Analyses start up to a minute late**, because one minute is the fastest a
   Cron Trigger fires.
-- **25MB per upload** by default (`MAX_UPLOAD_BYTES`), to keep several hundred
-  clips inside R2's 10GB free tier. Cloudflare's own request-body ceiling is
-  100MB on Free and Pro plans, enforced upstream of your code; beyond that you
-  need presigned URLs straight to R2.
+- **20MB per upload** by default (`MAX_UPLOAD_BYTES`), under KV's hard 25 MiB
+  per-value ceiling. Cloudflare's own request-body limit is 100MB on Free and
+  Pro plans; KV is the tighter constraint here.
+- **~50 clips of storage**, and clips expire after `VIDEO_TTL_DAYS`. Moving to
+  R2, Supabase Storage or Cloudinary is a rewrite of `src/storage.py` alone.
+- **No video seeking.** KV cannot serve a byte range, so a browser downloads a
+  clip whole before it can scrub. Fine at 20MB; not fine at 200MB.
 - **40 analyses per day** by default (`DAILY_ANALYSIS_CAP`), guarding Gemini's
   free quota. Set it to `0` to lift the cap.
 - **Python Workers are in open beta.** The `python_workers` compatibility flag

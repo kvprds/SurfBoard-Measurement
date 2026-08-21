@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import os, sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -51,6 +52,27 @@ r = c.post("/send_zoom_message", data={"message": "hi", "_csrf_token": "wrong"},
 check("POST with a wrong token is 403", r.status_code == 403, r.status_code)
 r = c.post("/send_zoom_message", data={"message": "hello coach", "_csrf_token": csrf}, follow_redirects=False)
 check("POST with the right token succeeds", r.status_code == 303, r.status_code)
+
+print("\n=== form parsing needs no python-multipart ===")
+# The whole suite runs without python-multipart installed, which is the point:
+# it is not in the Worker bundle either. When routes went through Starlette's
+# Request.form(), every form POST above passed here and 500ed in production on
+# `AssertionError: The python-multipart library must be installed`.
+check("python-multipart is genuinely absent",
+      importlib.util.find_spec("python_multipart") is None
+      and importlib.util.find_spec("multipart") is None)
+
+r = c.post("/send_zoom_message", content=b"message=percent+en%C3%A7oded&_csrf_token=" + csrf.encode(),
+           headers={"Content-Type": "application/x-www-form-urlencoded"}, follow_redirects=False)
+check("percent- and plus-encoding decode as UTF-8", r.status_code == 303, r.status_code)
+stored = asyncio.get_event_loop().run_until_complete(
+    dbx.zoom_messages(dbx.Database(env.DB), "surfer@example.com"))
+check("  ...and the decoded text reached D1",
+      any(m["message"] == "percent ençoded" for m in stored), stored)
+
+r = c.post("/send_zoom_message", files={"message": (None, "hi"), "_csrf_token": (None, csrf)},
+           follow_redirects=False)
+check("a multipart body is refused, not a 500", r.status_code == 403, r.status_code)
 
 print("\n=== dashboard + D1 round trip ===")
 r = c.get("/dashboard")

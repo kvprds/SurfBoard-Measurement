@@ -197,13 +197,36 @@ submitted silently vanishes while the request still returns 200.
 
 ```python
 body = await request.body()
-form = await Request(scope, _replay(body)).form()
-submitted = form.get("_csrf_token")
+submitted = _form_fields(body, request.headers.get("content-type", "")).get("_csrf_token")
 receive = _replay(body)          # hand the route an unread body
 ```
 
 `tests/test_app.py` covers it: post a zoom message, then assert it is actually
 in the database.
+
+### Forms are parsed without `python-multipart`
+
+`Request.form()` used to be what read that token, and every form POST on the
+deployed app — Buy, the stats wizard, every admin action — returned a 500:
+
+```
+AssertionError: The `python-multipart` library must be installed to use form parsing.
+```
+
+Starlette asserts that package is present before it will parse *any* form body,
+including `application/x-www-form-urlencoded`, which needs none of what it does.
+It is not in the Worker bundle. Off-platform it happened to be installed, so the
+tests were green while production was not — the worst shape a dependency can be
+in.
+
+`_form_fields()` in `app.py` parses urlencoded bodies with `urllib.parse.parse_qsl`
+and the dependency is gone. Nothing here posts multipart: video uploads bypass
+ASGI entirely and arrive as raw `PUT` bodies, so the only form encoding the app
+ever sees is the one a `<form>` sends by default. A multipart body yields no
+fields rather than raising, which the CSRF gate turns into a 403.
+
+The suite now runs *without* `python-multipart` installed, deliberately, so the
+tests exercise the same parser production does.
 
 ### Bundles are spent in SQL, not in Python
 

@@ -198,8 +198,21 @@ class Default(WorkerEntrypoint):
 
     # -- cron sweeper -------------------------------------------------------
 
-    async def scheduled(self, controller, env, ctx):
+    async def scheduled(self, controller=None, env=None, ctx=None):
         """Run one queued analysis. Fired by the Cron Trigger every minute.
+
+        Every argument is optional on purpose. The Python Workers runtime is in
+        open beta and has invoked this handler with both `(controller, env, ctx)`
+        and `(controller)` alone, with the bindings read off `self` — and the
+        mismatch is not a soft failure. The handler is called unrelaxed, so the
+        wrong arity is a TypeError before the first line of the body runs, on
+        every tick, once a minute, for as long as it goes unnoticed:
+
+            TypeError: Default.scheduled() takes 3 positional arguments
+                       but 4 were given
+
+        Accepting either shape and falling back to `self.env` costs one line
+        and cannot be got wrong by a runtime upgrade.
 
         This is what replaced threading.Thread, and then replaced Cloudflare
         Queues: Queues is not available on the Workers free plan, and this
@@ -213,6 +226,7 @@ class Default(WorkerEntrypoint):
         network, which does not count toward CPU, but claiming several jobs at
         once would multiply the parsing that does.
         """
+        env = env if env is not None else self.env
         database = dbx.Database(env.DB)
         token = secrets.token_hex(16)
 

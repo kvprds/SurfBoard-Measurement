@@ -12,6 +12,7 @@
 **A full-stack web app that recommends surfboard dimensions from a surfer's video, using Google's Gemini multimodal AI — deployed on Cloudflare's edge, entirely on free tiers.**
 
 🔗 **Live app:** <https://surfboard-measurement.tomer-berger08.workers.dev/dashboard>
+
 ▶️ **Explanation video:** <https://www.youtube.com/watch?v=mvt0JRw-Pr8>
 
 > ⚠️ Software engineering **learning project**. Recommendations are AI-generated and are not professional sizing advice.

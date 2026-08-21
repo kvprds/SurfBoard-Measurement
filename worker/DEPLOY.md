@@ -53,7 +53,16 @@ Copy the printed `database_id` into `wrangler.jsonc`, replacing
 
 ```bash
 npx wrangler d1 execute surfboard-db --remote --file=./schema.sql
+npx wrangler d1 execute surfboard-db --remote --file=./seed_pro.sql
 ```
+
+The second file is not optional if you want good recommendations. `seed_pro.sql`
+loads ten professional sizing decisions as `is_pro = 1` rows, and those rows are
+what `coach_examples()` reads to build the few-shot block of the Gemini prompt.
+Skip it and the prompt falls back to "No historical data yet. Use your best
+judgment" — the app still answers, but ungrounded, which is the one thing the
+few-shot design exists to prevent. It is safe to re-run; it replaces its own
+rows and leaves real ones alone.
 
 Service 2 is the Worker itself, deployed in step 4.
 
@@ -146,6 +155,7 @@ within a second or two of the redirect.
 ```bash
 cp .dev.vars.example .dev.vars     # fill it in; it is gitignored
 npx wrangler d1 execute surfboard-db --local --file=./schema.sql
+npx wrangler d1 execute surfboard-db --local --file=./seed_pro.sql
 uv run pywrangler dev
 ```
 

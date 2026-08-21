@@ -22,7 +22,7 @@
 
 A surfer signs in, uploads a video of themselves in the water, and enters their height, weight, and skill level. The app sends the footage to **Gemini 2.5 Flash**, which confirms the clip actually shows surfing, assesses technique, and recommends an ideal board **volume (liters)** and **length (feet/inches)**.
 
-To keep recommendations grounded in real expertise, the app pulls an experienced coach's previous sizing decisions from the database and feeds them into the prompt as **few-shot examples**, so the model mirrors a human coach's logic rather than guessing from scratch.
+To keep recommendations grounded in real expertise, the app pulls an experienced coach's previous sizing decisions from the database and feeds them into the prompt as **few-shot examples**, so the model mirrors a human coach's logic rather than guessing from scratch. A fresh database starts with [`worker/seed_pro.sql`](worker/seed_pro.sql) — ten professional surfers with the height, weight, volume and length recorded for each — and the coach's own decisions accumulate on top as they review.
 
 ## ✨ Key Features
 
@@ -110,10 +110,24 @@ The suite deliberately runs **without** `python-multipart` installed, because th
 | `worker/src/storage.py` | **Current** | Where clips live. The one file to change to swap storage providers. |
 | `worker/src/templates.py` | **Current** | The Jinja2 templates. |
 | `worker/schema.sql` | **Current** | The D1 schema. |
-| `SurfBoard-Measurement/web.py` | Reference | The original single-file Flask app. Kept as the reference implementation; not deployed. |
-| `SurfBoard-Measurement/surf_data.csv` | Reference | Header-only template, one row per video, read by `jsonl.py`. |
-| `SurfBoard-Measurement/jsonl.py` | Reference | Builds a fine-tuning dataset from the CSV. Unused — sizing comes from few-shot prompting at request time, not a fine-tuned model. |
-| `SurfBoard-Measurement/seed_db.py` | **Does not run** | Written against an earlier `web.py`; imports functions that no longer exist. Kept for the dataset it carries. |
+| `worker/seed_pro.sql` | **Current** | Ten professional sizing decisions. Seeds the few-shot examples the prompt is grounded in. |
+
+The original single-file Flask app that this was ported from is no longer in the
+tree. It was the reference implementation, never the deployment, and keeping
+1,200 lines of superseded code beside the thing that replaced it only invited
+reading the wrong file. It stays in git history, and
+[`ARCHITECTURE.md`](worker/ARCHITECTURE.md) walks through what changed and why:
+
+```bash
+git show 2bf383f:SurfBoard-Measurement/web.py
+```
+
+Two dataset scripts went with it: `jsonl.py`, which built a fine-tuning corpus
+for an approach this app does not take, and `seed_db.py`, which imported
+functions `web.py` had already stopped defining and so raised `ImportError`
+before doing anything. The sizing data `seed_db.py` carried was the one part
+worth keeping, and it now lives in `worker/seed_pro.sql`, where it actually
+runs.
 
 ## 📌 Notes & Limitations
 
